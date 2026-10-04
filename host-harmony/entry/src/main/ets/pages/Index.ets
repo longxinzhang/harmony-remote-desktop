@@ -1,14 +1,31 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import probe from 'libhrd_probe.so';
 import { deviceInfo } from '@kit.BasicServicesKit';
+import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { ClipboardPermission } from '../services/ClipboardPermission';
 
 interface DeviceSnapshot {
   appVersion: string;
+  appBuild: number;
   sessionMode: string;
   deviceType: string;
   osFullName: string;
   api: number;
   sdk: string;
+}
+
+interface ClipboardSnapshot {
+  allowed: boolean;
+  bound: boolean;
+  mode: number;
+  canRead: boolean;
+  canWrite: boolean;
+  sent: number;
+  received: number;
+  applied: number;
+  error: string;
+  errorCode: number;
 }
 
 interface CaptureSnapshot {
@@ -88,6 +105,13 @@ struct Index {
   @State remoteEnabled: boolean = false;
   @State remoteError: number = 0;
   @State remotePending: number = 0;
+  @State clipboardAllowed: boolean = false;
+  @State clipboardBound: boolean = false;
+  @State clipboardReadGranted: boolean = false;
+  @State clipboardPermissionBusy: boolean = false;
+  @State clipboardSummary: string = '关闭';
+  @State clipboardNotice: string = '';
+  private clipboardStateSnapshot: string = '';
   @StorageLink('hrdSessionMode') sessionMode: string = 'permanent';
   @State status: string = '等待连接';
   @State action: string = '';
@@ -112,6 +136,7 @@ struct Index {
     if (this.refreshTimer !== -1) { clearInterval(this.refreshTimer); }
     this.cancelAction();
     this.stopMotion();
+    probe.allowClipboard(false);
     probe.stopCapture();
     probe.stopEncoder();
     probe.stopLanServer();
@@ -150,6 +175,22 @@ struct Index {
       this.remoteEnabled = remote.sessionEnabled;
       this.remoteError = remote.errorCode;
       this.remotePending = remote.pendingKeysCount + remote.pendingButtonsCount + remote.pendingAxesCount;
+      this.clipboardReadGranted = ClipboardPermission.granted();
+      probe.setClipboardPermission(this.clipboardReadGranted);
+      const clipboard = JSON.parse(probe.clipboardSnapshot()) as ClipboardSnapshot;
+      this.clipboardAllowed = clipboard.allowed;
+      this.clipboardBound = clipboard.bound;
+      const directions: string[] = ['关闭', 'Mac → 鸿蒙', '鸿蒙 → Mac', '双向'];
+      this.clipboardSummary = !clipboard.allowed ? '关闭' : !clipboard.bound ? '等待 Mac 连接' :
+        `${directions[clipboard.mode] ?? '关闭'} · 发送 ${clipboard.sent} 次 / 写入 ${clipboard.applied} 次`;
+      if (clipboard.error.length > 0) {
+        this.clipboardSummary += ` · ${clipboard.error} (${clipboard.errorCode})`;
+      }
+      const clipboardState = `${clipboard.allowed}:${clipboard.bound}:${clipboard.mode}:${clipboard.canRead}:${clipboard.canWrite}:${clipboard.sent}:${clipboard.applied}:${clipboard.errorCode}`;
+      if (this.clipboardStateSnapshot !== '' && clipboardState !== this.clipboardStateSnapshot) {
+        this.persistDiagnostics();
+      }
+      this.clipboardStateSnapshot = clipboardState;
       const lanState = `${lan.status}:${lan.streaming}:${encoder.running}:${remote.allowed}:${remote.sessionEnabled}`;
       if (this.lanStateSnapshot !== '' && lanState !== this.lanStateSnapshot) {
         this.persistDiagnostics();
@@ -171,6 +212,32 @@ struct Index {
     const code = probe.startCapture(this.filesDir);
     this.status = `Start Capture 返回 ${code}；请在系统弹窗选择整个主屏幕`;
     this.refresh();
+  }
+
+  private async requestClipboardPermission(): Promise<void> {
+    if (this.clipboardPermissionBusy) { return; }
+    this.clipboardPermissionBusy = true;
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      this.clipboardReadGranted = await ClipboardPermission.request(context);
+      probe.setClipboardPermission(this.clipboardReadGranted);
+      this.clipboardNotice = this.clipboardReadGranted ? '读取权限已允许；开启同步后可将鸿蒙文字同步到 Mac。' :
+        '读取未获授权，鸿蒙 → Mac 暂不可用。可在系统设置中允许；Mac → 鸿蒙接收仍可单独使用。';
+    } catch (error) {
+      const code = (error as BusinessError).code;
+      this.clipboardNotice = `读取授权失败 (${code})。请核对系统授权及应用签名包含 READ_PASTEBOARD。`;
+    } finally {
+      this.clipboardPermissionBusy = false;
+      this.refresh();
+      this.persistDiagnostics();
+    }
+  }
+
+  private toggleClipboard(): void {
+    const code = probe.allowClipboard(!this.clipboardAllowed);
+    this.clipboardNotice = code === 0 ? '同步方向在 Mac 端选择；开启或重连不会交换原有剪贴板。' : `开关设置失败 (${code})`;
+    this.refresh();
+    this.persistDiagnostics();
   }
 
   private startEncoder(): void {
@@ -234,6 +301,7 @@ struct Index {
   private persistDiagnostics(): void {
     const device: DeviceSnapshot = {
       appVersion: '0.5.0',
+      appBuild: 1000008,
       sessionMode: this.sessionMode,
       deviceType: deviceInfo.deviceType,
       osFullName: deviceInfo.osFullName,
@@ -281,10 +349,10 @@ struct Index {
   build() {
     Scroll() {
       Column({ space: 14 }) {
-        Text('Harmony Remote · v0.5.0').fontSize(28).fontWeight(FontWeight.Bold)
-        Text('局域网桌面共享与键鼠控制 · API 26 · PC/2in1').fontSize(16)
+        Text('Harmony Remote · v0.5.0 · 剪贴板').fontSize(28).fontWeight(FontWeight.Bold)
+        Text('局域网桌面共享、键鼠控制与文字同步 · API 26 · PC/2in1').fontSize(16)
         Text('连接 Mac 接收端').fontSize(22).fontWeight(FontWeight.Medium).margin({ top: 14 })
-        Text('仅用于可信局域网；当前视频传输未加密。启动服务后，使用一次性 PIN 配对。').fontSize(15)
+        Text('仅用于可信局域网；当前连接未加密。启动服务后，使用一次性 PIN 配对。').fontSize(15)
         TextInput({ placeholder: '本机局域网 IPv4，留空自动选择', text: this.lanAddress })
           .enabled(!this.lanRunning).onChange((value: string) => { this.lanAddress = value; }).width(430)
         Row({ space: 12 }) {
@@ -348,6 +416,17 @@ struct Index {
           Text(`输入诊断：返回码 ${this.remoteError}；待释放 ${this.remotePending}。失败后会停止控制，请重新检查授权。`)
             .fontSize(14).fontColor('#A83220')
         }
+        Text('文字剪贴板').fontSize(22).fontWeight(FontWeight.Medium).margin({ top: 14 })
+        Text(`读取权限：${this.clipboardReadGranted ? '已允许' : '未允许'} · ${this.clipboardSummary}`).fontSize(16)
+        Row({ space: 12 }) {
+          Button(this.clipboardPermissionBusy ? '正在请求…' : '允许读取剪贴板')
+            .enabled(!this.clipboardPermissionBusy && !this.clipboardReadGranted)
+            .onClick(() => { this.requestClipboardPermission(); })
+          Button(this.clipboardAllowed ? '关闭剪贴板同步' : '允许剪贴板同步')
+            .enabled(this.lanRunning || this.clipboardAllowed).onClick(() => this.toggleClipboard())
+        }
+        Text('开启后，同步新复制的纯文字，不保留排版。Mac 可选择单向或双向；文件和图片暂不支持。').fontSize(14)
+        if (this.clipboardNotice.length > 0) { Text(this.clipboardNotice).fontSize(14) }
         if (this.encoderRunning && this.lanStreaming) {
           Text(`${this.encoderFrames} 帧 · ${this.encoderFps.toFixed(1)} FPS · ${this.encoderElapsed.toFixed(1)} 秒`).fontSize(19)
           if (this.sessionMode === 'debug') {

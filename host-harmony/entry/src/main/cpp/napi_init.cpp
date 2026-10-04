@@ -8,6 +8,7 @@
 #include "input_probe.h"
 #include "lan_server.h"
 #include "remote_input.h"
+#include "clipboard_service.h"
 
 namespace {
 napi_value Number(napi_env env, int code)
@@ -81,12 +82,14 @@ napi_value StartLanServer(napi_env env, napi_callback_info info)
     std::string address;
     if (argc != 1 || !ReadText(env, args[0], address)) { return nullptr; }
     GetRemoteInput().SetAllowed(false);
+    GetClipboardService().Allow(false);
     return Number(env, GetLanServer().Start(address));
 }
 
 napi_value StopLanServer(napi_env env, napi_callback_info)
 {
     GetRemoteInput().SetAllowed(false);
+    GetClipboardService().Allow(false);
     // Stop the producer before closing its non-blocking stream sink.
     GetEncoderProbe().Stop();
     GetLanServer().Stop();
@@ -172,6 +175,25 @@ napi_value CancelInput(napi_env env, napi_callback_info)
     return Number(env, GetInputProbe().CancelAndRelease());
 }
 
+napi_value ClipboardSnapshot(napi_env env, napi_callback_info)
+{
+    return Text(env, GetClipboardService().SnapshotJson());
+}
+napi_value AllowClipboard(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1; napi_value args[1]; bool value = false;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1 || napi_get_value_bool(env, args[0], &value) != napi_ok) return Number(env, -1);
+    GetClipboardService().Allow(value); return Number(env, 0);
+}
+napi_value SetClipboardPermission(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1; napi_value args[1]; bool value = false;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1 || napi_get_value_bool(env, args[0], &value) != napi_ok) return Number(env, -1);
+    GetClipboardService().SetReadPermission(value); return Number(env, 0);
+}
+
 napi_value RemoteInputSnapshot(napi_env env, napi_callback_info)
 {
     return Text(env, GetRemoteInput().SnapshotJson());
@@ -223,6 +245,7 @@ napi_value SaveDiagnostics(napi_env env, napi_callback_info info)
     success = WriteFile(filesDir + "/encoder-snapshot.json", GetEncoderProbe().SnapshotJson()) && success;
     success = WriteFile(filesDir + "/lan-snapshot.json", GetLanServer().SnapshotJson()) && success;
     success = WriteFile(filesDir + "/remote-input.json", GetRemoteInput().SnapshotJson()) && success;
+    success = WriteFile(filesDir + "/clipboard-snapshot.json", GetClipboardService().SnapshotJson()) && success;
     success = WriteFile(filesDir + "/device-info.json", deviceJson) && success;
     return Number(env, success ? 0 : -2);
 }
@@ -230,6 +253,7 @@ napi_value SaveDiagnostics(napi_env env, napi_callback_info info)
 void Cleanup(void*)
 {
     GetRemoteInput().SetAllowed(false);
+    GetClipboardService().Allow(false);
     GetCaptureProbe().Stop();
     GetEncoderProbe().Stop();
     GetLanServer().Stop();
@@ -246,7 +270,19 @@ napi_value Init(napi_env env, napi_value exports)
     inputHooks.enabled = [] { return GetRemoteInput().IsSessionEnabled(); };
     inputHooks.submit = [](const RemoteInputEvent& event) { return GetRemoteInput().Submit(event); };
     inputHooks.release = [] { GetRemoteInput().ReleaseAll(); };
+    GetClipboardService();
     GetLanServer().SetInputHooks(std::move(inputHooks));
+    LanClipboardHooks clipboardHooks;
+    clipboardHooks.start = [](const std::string& address) { return GetClipboardService().Start(address); };
+    clipboardHooks.stop = [] { GetClipboardService().Stop(); };
+    clipboardHooks.pair = [](std::string& epoch, std::string& token) { return GetClipboardService().BeginSession(epoch, token); };
+    clipboardHooks.disconnect = [] { GetClipboardService().EndSession(); };
+    clipboardHooks.port = [] { return GetClipboardService().Port(); };
+    clipboardHooks.paste = [](const std::string& epoch, const std::string& event, ClipboardService::Deadline deadline) {
+        return GetClipboardService().Paste(epoch, event, deadline,
+            [](std::function<bool()> valid, ClipboardService::Deadline until) { return GetRemoteInput().Paste(std::move(valid), until); });
+    };
+    GetLanServer().SetClipboardHooks(std::move(clipboardHooks));
     GetEncoderProbe();
     napi_property_descriptor methods[] = {
         {"startCapture", nullptr, StartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -258,6 +294,9 @@ napi_value Init(napi_env env, napi_value exports)
         {"startLanServer", nullptr, StartLanServer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopLanServer", nullptr, StopLanServer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"lanSnapshot", nullptr, LanSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"allowClipboard", nullptr, AllowClipboard, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setClipboardPermission", nullptr, SetClipboardPermission, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clipboardSnapshot", nullptr, ClipboardSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"remoteInputSnapshot", nullptr, RemoteInputSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"allowRemoteInput", nullptr, AllowRemoteInput, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startLanCapture", nullptr, StartLanCapture, nullptr, nullptr, nullptr, napi_default, nullptr},

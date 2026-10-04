@@ -1,21 +1,21 @@
 # Harmony Remote macOS Viewer
 
-原生局域网查看与键鼠客户端：SwiftUI/AppKit 窗口、Network.framework 局域网连接、VideoToolbox H.264 解码，以及只保留最新已解码图像的显示路径。当前版本 **0.5.0**，每次连接默认仅查看，在 Host 授权并允许之后可在 Mac 启用键鼠控制。Host 只提供“10 分钟调试”和“永久上线”两种 LAN 共享模式，两者都不录像。
+原生局域网查看、键鼠与纯文字剪贴板客户端：SwiftUI/AppKit 窗口、Network.framework 局域网连接、VideoToolbox H.264 解码，以及只保留最新已解码图像的显示路径。当前版本 **0.5.0 剪贴板构建（Mac `5`，配套 Host `1000008`）**，每次连接默认仅查看，在 Host 授权并允许之后可在 Mac 启用键鼠控制。Host 只提供“10 分钟调试”和“永久上线”两种 LAN 共享模式，两者都不录像。
 
-**0.5.0 已构建并安装、启动，部署由 [build-verification-0.5.0](../artifacts/build-verification-0.5.0.json) 记录**。首个有效非空 AU 到达后，Mac 不再设置固定会话总时长或累计 2 GiB 接收上限。永久模式长期真机运行尚未验收，以下 0.4.1 结果属于保留的历史证据。
+当前 Mac build `5` 已完整构建、校验签名并同步常用启动路径，打开界面确认四方向菜单及默认关闭；最终剪贴板 **39 项**、网络 **105 项**、输入 **21 项**开发测试通过。配套 Host 已安装启动，真实读取授权与双向粘贴仍待验证，见[剪贴板验证记录](../docs/CLIPBOARD_TEST_RESULTS.md)。此前 [0.5.0 会话模式基线的部署记录](../artifacts/build-verification-0.5.0.json) 独立保留。首个有效非空 AU 到达后，Mac 不再设置固定会话总时长或累计 2 GiB 接收上限。永久模式长期真机运行尚未验收，以下 0.4.1 结果属于保留的历史证据。
 
 **0.4.1 用户实机确认窗口拖动、文字拖选及松手停止正常**，见 [拖拽记录](../artifacts/device/drag-0-4-1-verified/drag-review.json)。本批五分钟查看随后完整结束：Host 编码/发送、Mac 接收/解码均 **9001 帧**，**300.021 秒 / 29.995 FPS**，1620×1080、硬解确认、EOS 完整、无记录错误、未保存录像，见 [完整会话记录](../artifacts/device/drag-0-4-1-completed/session-review.json)。**0.4.0 已确认 Mac 英文输入、右键菜单和 `⌘L`**；该版拖拽失败保留于 [历史输入记录](../artifacts/device/control-live-take-03/input-review.json)。此前 8985 帧五分钟查看及 0.3.0 的 303 帧短时 GUI 证据保留在 [历史查看结果](../MAC_VIEWER_TEST_RESULT.md)。文件拖动、新版多按钮组合、滚轮方向、持键失焦/断线等仍待验收，不能将这些局部成功当成完整输入通过。
 
 ## 本机构建与运行
 
-0.5.0 已完成 Host 与 Mac 完整构建；Mac 网络 **105 项**测试通过，含真实 C++ / NWConnection 联动、模拟长期活动会话、分批累计超过 2 GiB，以及保留本地回放和单包上限的检查，见 [网络测试日志](../artifacts/mac-network-tests-permanent-mode.log)。原生会话策略、计时回归及实际 API 26 对象编译也已通过，见 [原生验证](../artifacts/encoder-native-verification-0.5.0.json)。常用启动路径已同步为 0.5.0、签名校验通过并启动，具体指纹与部署状态见 [构建及部署记录](../artifacts/build-verification-0.5.0.json)：
+此前 0.5.0 会话模式基线已完成 Host 与 Mac 完整构建；Mac 网络 **105 项**测试通过，含真实 C++ / NWConnection 联动、模拟长期活动会话、分批累计超过 2 GiB，以及保留本地回放和单包上限的检查，见 [基线网络测试日志](../artifacts/mac-network-tests-permanent-mode.log)。原生会话策略、计时回归及实际 API 26 对象编译也已通过，见 [原生验证](../artifacts/encoder-native-verification-0.5.0.json)。剪贴板新增测试单列于[本轮验证记录](../docs/CLIPBOARD_TEST_RESULTS.md)，常用启动路径为：
 
 ```bash
 cd /Users/zhanglongxin/Desktop/longxincode/harmony-remote
 open -n client-macos/build/HarmonyRemote.app
 ```
 
-0.5.0 归档为 [Mac ZIP](../artifacts/releases/0.5.0/HarmonyRemote-Mac-0.5.0.zip) 与 [Host HAP](../artifacts/releases/0.5.0/HarmonyRemote-Host-0.5.0.hap)。Host 空闲启动已核对，十分钟完整共享、永久模式长期运行及模式切换后重启记忆尚未真机验收。
+此前会话模式基线归档为 [Mac ZIP](../artifacts/releases/0.5.0/HarmonyRemote-Mac-0.5.0.zip) 与 [Host HAP](../artifacts/releases/0.5.0/HarmonyRemote-Host-0.5.0.hap)，不含本轮新增剪贴板。该基线 Host 空闲启动已核对，十分钟完整共享、永久模式长期运行及模式切换后重启记忆尚未真机验收。
 
 0.4.1 历史验收时运行进程 PID `96911` 与归档二进制匹配，Mac 网络 97 项、原生输入 32 项开发测试通过，见 [历史构建验证](../artifacts/build-verification-0.4.1.json)。已验收归档仍在 `artifacts/releases/0.4.1/mac-build/HarmonyRemote.app`，[Mac ZIP](../artifacts/releases/0.4.1/HarmonyRemote-Mac-0.4.1.zip) 位于 `mac-build` 上一层；当时安装的 [0.4.1 Host HAP](../artifacts/releases/0.4.1/HarmonyRemote-Host-0.4.1.hap) 也保留不变。
 
@@ -31,7 +31,7 @@ open -n client-macos/build/HarmonyRemote.app
 
 ## 实时局域网查看
 
-1. 确认两端使用 0.5.0 构建及部署记录中的版本。鸿蒙端点击 **Start Server**，读取页面上的 RFC1918 IPv4 和一次性 6 位 PIN；“在线，等待连接”对应原状态 `LISTENING`。测试双方处于同一可信局域网。
+1. 确认两端使用 0.5.0 剪贴板构建（Host `1000008` / Mac `5`）。鸿蒙端点击 **Start Server**，读取页面上的 RFC1918 IPv4 和一次性 6 位 PIN；“在线，等待连接”对应原状态 `LISTENING`。测试双方处于同一可信局域网。
 2. 在 Mac 窗口输入地址和 PIN，点击 **连接**。PIN 使用隐藏输入框，提交后清空；不要把 PIN 或 session token 放入启动参数、环境变量或日志。
 3. 在 Host 选择 **10 分钟调试**或 **永久上线**，等待视频通道就绪后点击 **Start LAN Capture**，并由用户在系统弹窗授权共享整个主屏幕。调试从首帧开始计时，600 秒自动结束；永久模式时长值为 0，不设自动结束时间。配对不会自动发起录屏。
 4. Mac 窗口显示收到的桌面，默认仅查看。Host 点击允许远程控制后，可在 Mac 点击启用键鼠控制并点击画面操作。结束后保留最后一帧。**断开**只终止本次查看；下一轮连接前在 Host 执行 **Stop Server → Start Server**，生成新 PIN。
@@ -46,7 +46,17 @@ open -n client-macos/build/HarmonyRemote.app --args \
 
 Host 默认“永久上线”，`PersistentStorage` 的 `hrdSessionMode` 只保存模式选择；不恢复授权、允许开关或配对。调试显示动态图案和开发面板，永久隐藏；两种 LAN 模式均不保存 H.264。永久模式在用户停止、断线、应用关闭或错误时结束，不包含自动重连或无人确认的共享。
 
-`--host` 仅预填地址，不自动连接。地址可保存在本机 `UserDefaults` 中；PIN/token 只用于内存中的当前配对会话，不写入诊断。控制/视频端口为 39871/39872；协议校验包括配对、心跳、完整组包、序号、CONFIG/IDR 和 EOS。目前仍为可信局域网明文原型，PIN 配对不等于传输加密。
+`--host` 仅预填地址，不自动连接。地址可保存在本机 `UserDefaults` 中；PIN/token 只用于内存中的当前配对会话，不写入诊断。控制/视频端口为 39871/39872，协商后的剪贴板独立使用 39873；协议校验包括配对、心跳、完整组包、序号、CONFIG/IDR 和 EOS。目前仍为可信局域网明文原型，PIN 配对不等于传输加密。
+
+## 纯文字剪贴板
+
+四种模式为 **关闭 / Mac → 鸿蒙 / 鸿蒙 → Mac / 双向**。首次默认关闭，Mac 保存方向偏好；Host 另有本地允许开关。开启、重连及切换方向都只同步之后的新复制，不自动交换原有内容。单次最多 **1 MiB UTF-8 纯文字**，不保留排版；文件传输、文件粘贴与图片后续实现。
+
+配对后，在 Host 点击 **允许读取剪贴板**完成系统授权（鸿蒙 → Mac 所需），再点击 **允许剪贴板同步**，在 Mac 选择方向并重新复制文字。Mac 如要求剪贴板访问许可，按系统提示确认；**获取远端文字**可显式拉取当前远端文本。普通同步不需要启用键鼠。
+
+远端粘贴还需 Host 输入授权、双方启用远程控制并聚焦共享画面。Mac → 鸿蒙开启时，`⌘V` / `Ctrl+V` 先同步当前文字，收到实际写入确认后再提交一次远端粘贴；失败、超时、失焦或内容变化时取消，不回落发送 raw V。鸿蒙 → Mac 接收可在 Viewer 不活跃时继续，实际系统后台读取仍待真机验证。
+
+见[剪贴板协议](../docs/CLIPBOARD_WIRE.md)、[平台权限](../docs/PLATFORM_CAPABILITIES.md)及[验证结果与边界](../docs/CLIPBOARD_TEST_RESULTS.md)。诊断只保存计数、字节数和错误，不保存文字、文字摘要或绑定凭据。
 
 ## 离线开发回放
 

@@ -18,3 +18,6 @@ export const clickLeft: () => number;
 export const injectCtrlL: () => number;
 export const cancelInput: () => number;
 export const saveDiagnostics: (filesDir: string, deviceJson: string) => number;
+export const allowClipboard: (allowed: boolean) => number;
+export const setClipboardPermission: (granted: boolean) => number;
+export const clipboardSnapshot: () => string;

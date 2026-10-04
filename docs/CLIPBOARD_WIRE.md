@@ -1,0 +1,27 @@
+# Clipboard v1 implementation contract (0.5.0)
+
+This is an HRD protocol, independently implemented with system APIs. It does not copy RustDesk code. File transfer, file clipboard, images and rich-text preservation are deferred. Existing trusted-LAN transport remains plaintext; clipboard is opt-in on both endpoints. Do not log payloads, digests, PINs or binding credentials.
+
+## Negotiation and binding
+
+Existing protocol 1 hello remains compatible. New hello_ack advertises `clipboardSupported:true`, `clipboardPort:39873`. New pair_ok adds `clipboardEpoch` (32 lowercase hex chars) and `clipboardBindToken` (64 lowercase hex chars). Old peers ignore optional fields. New clients only open the extra connection when advertised. Host creates a fresh epoch and independent one-use binding credential per paired session, expires unused binding after 30 seconds, and destroys clipboard connection/state on control disconnect. Only one authenticated clipboard connection per session.
+
+Clipboard framing: uint32 big-endian header length, flat ASCII JSON header (1..4096 bytes), followed by exactly payloadLength raw bytes (0..1048576). All headers contain numeric version=1, string type, string sessionEpoch, string messageId (32 lowercase hex chars), numeric payloadLength. Header rejects duplicate fields, non-ASCII strings, unexpected keys, invalid integer encodings and oversized lengths. Payload uses strict UTF-8, no U+0000 (native plaintext API cannot preserve it). Invalid data fails only the clipboard feature, not screen/input.
+
+First message: `data_bind`, extra fields `bindToken` and `purpose:"clipboard"`, payloadLength=0. Successful response: `data_ready`, payloadLength=0. All subsequent messages must match the active epoch. Independent 5-second frame/send deadline; idle connections remain allowed while the main control heartbeat is healthy. Bounded update queues; never allocate based on unvalidated lengths.
+
+## Messages
+
+- `clipboard_mode`: extra numeric mode: 0=off, 1=Mac to Harmony, 2=Harmony to Mac, 3=both. This is Mac's requested direction; Host's local allow switch is also mandatory. Mode changes reset platform baselines and do not send the previous clipboard contents. The next clipboard_status echoes the mode messageId as a barrier acknowledgement. The Mac neither sends nor applies updates under the new mode before that matching acknowledgement; preceding frames are discarded/rejected. Late acknowledgements for superseded updates are ignored. Logical counters remain monotonic within the paired epoch even when a mode, allow switch or permission changes.
+- `clipboard_status`: extra booleans allowed, canRead, canWrite; numeric mode; ASCII error (empty or stable code). No content. canRead is actual current permission/result, background behavior is not claimed verified merely from SDK availability.
+- `clipboard_update`: extra originId (`mac` or `harmony`), counter (canonical decimal uint64 string, >0), eventId (originId + "-" + counter), mime (`text/plain;charset=utf-8`), sha256 (64 lowercase hex chars). Payload exact UTF-8 text, including whitespace and empty text. Never turn file clipboard items into path text.
+- `clipboard_applied`: extra eventId, status (`applied`, `stale`, `denied`, `failed`), counter (current canonical uint64 string, initially "0"), originId (current origin or "none"), error (ASCII stable code). Sent only after the system clipboard write succeeds or a specific rejection. messageId echoes the update's messageId.
+- `clipboard_pull`: explicit user action, empty payload; Host samples current text and publishes a new Harmony event when direction allows. Normal activation never pushes an initial snapshot.
+
+Logical versions compare (counter, originId), ASCII lexical origin ordering. Observe incoming counter before next local increment. Repeated identical user copies are new events; suppress only the current self-written revision/tag/content match. Poll before applying remote data to capture an intervening local copy. Stale asynchronous results must check session/mode generation and platform revision. At most one inbound and one current/latest outbound update; bounded ACK/status queue. Error diagnostics contain only type, counts, byte size and error codes.
+
+## Remote paste barrier (existing control socket)
+
+`paste_commit` fields: type, sessionToken, clipboardEpoch, eventId, operationId (32 lowercase hex), ttlMs (integer 1..1500). Host verifies auth, active input/session, current clipboard event and current platform revision, then queues one complete Ctrl+V stroke with another clipboard validity check at execution. Release prior modifiers, inject down/up and release all on failure. Deduplicate bounded recent operation IDs; never retry a commit automatically.
+
+`paste_result` fields: type, sessionToken, operationId, status (`committed`, `stale`, `denied`, `failed`), error (stable ASCII code). Result means actual paste key injection completed, not merely queued. Paste request deadline uses Host monotonic time from receipt. Mac intercepts Cmd+V (Mac-friendly) and Ctrl+V when clipboard Mac->Harmony enabled, snapshots explicit current Mac text, sends update, waits for applied, rechecks focus/session, then commits exactly once. A context change, timeout or disconnect cancels pending paste; no raw V is also forwarded. Cmd+C remains remote copy. Receiving Harmony updates continues while Mac viewer is inactive.

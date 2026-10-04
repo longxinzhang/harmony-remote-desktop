@@ -157,6 +157,10 @@ final class RemoteInputEngine {
         (command && (key == 48 || key == 49)) || (control && (123...126).contains(key))
     }
     static func isCommandShortcut(_ key: UInt16) -> Bool { [0,8,9,37].contains(key) } // A,C,V,L
+    static func isClipboardPaste(key: UInt16, mode: RemoteKeyboardMode, command: Bool,
+                                 control: Bool, shift: Bool, option: Bool) -> Bool {
+        key == 9 && !shift && !option && (control || (command && mode == .macFriendly))
+    }
 
     // HIToolbox Events.h kVK values map physical ANSI positions; text/IME injection
     // is not synthesized. Unsupported Fn/media/IME keys are not sent.

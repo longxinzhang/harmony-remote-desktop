@@ -103,7 +103,7 @@ public:
         worker_.join();
     }
 
-    enum class TaskKind { Event, Allow, Enable, Release };
+    enum class TaskKind { Event, Allow, Enable, Release, Paste };
     bool Command(TaskKind kind, bool value = false)
     {
         auto answer = std::make_shared<std::promise<bool>>();
@@ -116,6 +116,21 @@ public:
             tasks_.push_back({kind, {}, value, answer});
         }
         condition_.notify_one();
+        return future.get();
+    }
+
+    bool Paste(std::function<bool()> validate, std::chrono::steady_clock::time_point deadline)
+    {
+        auto answer = std::make_shared<std::promise<bool>>(); auto future = answer->get_future();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!allowed_ || !enabled_ || stopping_ || tasks_.size() >= QUEUE_LIMIT || std::chrono::steady_clock::now() >= deadline) return false;
+            Task task {TaskKind::Paste, {}, false, answer}; task.validate = std::move(validate); task.deadline = deadline; task.generation = pasteGeneration_;
+            tasks_.push_back(std::move(task));
+        }
+        condition_.notify_one();
+        // The worker owns the completion. If an SDK call stalls, deadline checks
+        // still prohibit a later stale Ctrl+V; no retries are submitted.
         return future.get();
     }
 
@@ -181,10 +196,16 @@ public:
 
 private:
     struct Task {
-        TaskKind kind;
+        Task() = default;
+        Task(TaskKind k, RemoteInputEvent e, bool v, std::shared_ptr<std::promise<bool>> a)
+            : kind(k), event(std::move(e)), value(v), answer(std::move(a)) {}
+        TaskKind kind = TaskKind::Event;
         RemoteInputEvent event;
-        bool value;
+        bool value = false;
         std::shared_ptr<std::promise<bool>> answer;
+        std::function<bool()> validate;
+        std::chrono::steady_clock::time_point deadline {};
+        uint64_t generation = 0;
     };
     struct Display {
         uint64_t id = 0;
@@ -199,8 +220,10 @@ private:
 
     void ClearEventsLocked()
     {
+        ++pasteGeneration_;
         tasks_.erase(std::remove_if(tasks_.begin(), tasks_.end(), [](const Task& task) {
-            return task.kind == TaskKind::Event;
+            if (task.kind == TaskKind::Paste && task.answer) task.answer->set_value(false);
+            return task.kind == TaskKind::Event || task.kind == TaskKind::Paste;
         }), tasks_.end());
         queuedEvents_ = 0;
         projectedKeys_.clear();
@@ -388,6 +411,25 @@ private:
 
     bool HandleCommand(const Task& task)
     {
+        if (task.kind == TaskKind::Paste) {
+            auto valid = [&] {
+                { std::lock_guard<std::mutex> lock(mutex_); if (!enabled_ || task.generation != pasteGeneration_) return false; }
+                return std::chrono::steady_clock::now() < task.deadline && task.validate && task.validate();
+            };
+            if (!valid()) return false;
+            int code = CheckSession();
+            if (code == INPUT_SUCCESS) code = Release();
+            { std::lock_guard<std::mutex> lock(mutex_); projectedKeys_.clear(); projectedButtons_.clear(); }
+            if (code == INPUT_SUCCESS && !valid()) return false;
+            if (code == INPUT_SUCCESS) code = Key(KEYCODE_CTRL_LEFT, true);
+            // Never execute V after a delayed modifier injection invalidated the barrier.
+            if (code == INPUT_SUCCESS && !valid()) { const int cleanup = Release(); if (cleanup != INPUT_SUCCESS) Fail(cleanup, false); return false; }
+            if (code == INPUT_SUCCESS) code = Key(KEYCODE_A + ('V' - 'A'), true);
+            if (code == INPUT_SUCCESS) code = Key(KEYCODE_A + ('V' - 'A'), false);
+            if (code == INPUT_SUCCESS) code = Key(KEYCODE_CTRL_LEFT, false);
+            if (code != INPUT_SUCCESS) { Fail(code); return false; }
+            return true;
+        }
         if (task.kind == TaskKind::Release || !task.value) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -518,6 +560,7 @@ private:
     size_t pendingKeyCount_ = 0;
     size_t pendingButtonCount_ = 0;
     size_t pendingAxisCount_ = 0;
+    uint64_t pasteGeneration_ = 0;
     uint64_t accepted_ = 0;
     uint64_t processed_ = 0;
     uint64_t coalesced_ = 0;
@@ -542,5 +585,6 @@ bool RemoteInput::EnableSession(bool enabled) { return impl_->Command(Impl::Task
 bool RemoteInput::IsSessionEnabled() const { return impl_->Enabled(); }
 bool RemoteInput::Submit(const RemoteInputEvent& event) { return impl_->Submit(event); }
 void RemoteInput::ReleaseAll() { impl_->Command(Impl::TaskKind::Release); }
+bool RemoteInput::Paste(std::function<bool()> validate, std::chrono::steady_clock::time_point deadline) { return impl_->Paste(std::move(validate), deadline); }
 std::string RemoteInput::SnapshotJson() const { return impl_->Snapshot(); }
 RemoteInput& GetRemoteInput() { static RemoteInput input; return input; }

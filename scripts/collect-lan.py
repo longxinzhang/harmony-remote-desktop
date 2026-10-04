@@ -46,6 +46,12 @@ def receive(target, destination, name, limit):
                     raise ValueError("LAN diagnostic unexpectedly contains credential fields")
             if name == "device-info.json" and document.get("appVersion") not in ("0.3.0", "0.4.0", "0.4.1", "0.5.0"):
                 raise ValueError("Device snapshot is not from a supported LAN version")
+            if name == "clipboard-snapshot.json":
+                if not isinstance(document.get("allowed"), bool) or not isinstance(document.get("mode"), int):
+                    raise ValueError("Unexpected clipboard snapshot")
+                if re.search(r'"(?:text|payload|sha256|pin|sessionToken|bindToken|clipboardBindToken|sessionEpoch)"\s*:',
+                             data.decode("utf-8"), re.I):
+                    raise ValueError("Clipboard diagnostic unexpectedly contains private data fields")
         path.replace(destination / name)
         result.update(status="COLLECTED", bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
     return result
@@ -95,6 +101,8 @@ def main():
         device = json.loads((destination / "device-info.json").read_text())
         if device.get("appVersion") in ("0.4.0", "0.4.1", "0.5.0"):
             report["files"].append(receive(args.target, destination, "remote-input.json", 1024 * 1024))
+        if device.get("appBuild", 0) >= 1000008:
+            report["files"].append(receive(args.target, destination, "clipboard-snapshot.json", 1024 * 1024))
     except (OSError, ValueError) as error:
         report["files"].append({"name": "remote-input.json", "status": "FAILED", "error": str(error)})
     complete = all(item["status"] in ("COLLECTED", "SKIPPED_NOT_RECORDED", "SKIPPED_STALE_CAPTURE") for item in report["files"])

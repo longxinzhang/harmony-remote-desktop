@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -453,6 +454,41 @@ int main()
             CHECK(c[2].k.code == KEYCODE_CTRL_LEFT && c[2].k.action == KEY_ACTION_UP);
             CHECK(c[3].k.code == KEYCODE_A + 1 && c[3].k.action == KEY_ACTION_DOWN);
             CHECK(input.IsSessionEnabled());
+        });
+        test("paste releases previous modifiers and injects complete independent CtrlV", [] {
+            RemoteInput input; Ready(input); CHECK(input.Submit(Key("KEY_SHIFT_LEFT", true))); Done(input, 1);
+            CHECK(input.Paste([] { return true; }, std::chrono::steady_clock::now() + 1s));
+            auto c = Calls(); CHECK(c.size() == 6 && c[1].k.code == KEYCODE_SHIFT_LEFT && c[1].k.action == KEY_ACTION_UP);
+            CHECK(c[2].k.code == KEYCODE_CTRL_LEFT && c[2].k.action == KEY_ACTION_DOWN);
+            CHECK(c[3].k.code == KEYCODE_A + ('V' - 'A') && c[3].k.action == KEY_ACTION_DOWN);
+            CHECK(c[4].k.action == KEY_ACTION_UP && c[5].k.code == KEYCODE_CTRL_LEFT && c[5].k.action == KEY_ACTION_UP);
+            CHECK(Number(input.SnapshotJson(), "pendingKeysCount") == 0 && input.IsSessionEnabled());
+        });
+        test("paste rechecks clipboard at execution after SDK query", [] {
+            RemoteInput input; Ready(input); std::atomic<bool> valid {true}; BlockQuery();
+            auto result = std::async(std::launch::async, [&] { return input.Paste([&] { return valid.load(); }, std::chrono::steady_clock::now() + 1s); });
+            AwaitBlocked(); valid = false; Unblock(); CHECK(!result.get()); CHECK(Calls().empty());
+        });
+        test("paste receipt deadline prevents delayed V", [] {
+            RemoteInput input; Ready(input); BlockQuery();
+            auto result = std::async(std::launch::async, [&] { return input.Paste([] { return true; }, std::chrono::steady_clock::now() + 30ms); });
+            AwaitBlocked(); std::this_thread::sleep_for(50ms); Unblock(); CHECK(!result.get()); CHECK(Calls().empty());
+        });
+        test("paste injection failure releases uncertain modifiers and key", [] {
+            RemoteInput input; Ready(input);
+            { std::lock_guard<std::mutex> lock(sdkMutex); keyResults = {0, INPUT_SERVICE_EXCEPTION}; }
+            CHECK(!input.Paste([] { return true; }, std::chrono::steady_clock::now() + 1s));
+            CHECK(!input.IsSessionEnabled() && Number(input.SnapshotJson(), "pendingKeysCount") == 0);
+            auto c = Calls(); CHECK(c.size() == 4 && c[2].k.action == KEY_ACTION_UP && c[3].k.action == KEY_ACTION_UP);
+        });
+        test("paste cancellation with failed CtrlUp disables and preserves cleanup evidence", [] {
+            RemoteInput input; Ready(input); int checks = 0; upFailure = INPUT_SERVICE_EXCEPTION;
+            CHECK(!input.Paste([&] { return ++checks < 3; }, std::chrono::steady_clock::now() + 1s));
+            auto c = Calls(); CHECK(c.size() == 2 && c[0].k.code == KEYCODE_CTRL_LEFT && c[0].k.action == KEY_ACTION_DOWN);
+            CHECK(c[1].k.code == KEYCODE_CTRL_LEFT && c[1].k.action == KEY_ACTION_UP);
+            CHECK(!input.IsSessionEnabled() && Number(input.SnapshotJson(), "pendingKeysCount") == 1);
+            CHECK(Number(input.SnapshotJson(), "errorCode") == INPUT_SERVICE_EXCEPTION);
+            upFailure = 0; input.ReleaseAll(); CHECK(Number(input.SnapshotJson(), "pendingKeysCount") == 0);
         });
         test("diagnostics contain counts only and destructor releases", [] {
             {

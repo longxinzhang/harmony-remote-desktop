@@ -53,6 +53,9 @@ final class VideoSurfaceView: NSView {
     private var inputTracking: NSTrackingArea?
     private var observers: [NSObjectProtocol] = []
     private var allowsMomentum = false
+    private var clipboardPasteEnabled = false
+    private var onPaste: (@escaping () -> Bool) -> Void = { _ in }
+    private var focusGeneration: UInt64 = 0
 
     init(mailbox: FrameMailbox) {
         self.mailbox = mailbox
@@ -96,10 +99,12 @@ final class VideoSurfaceView: NSView {
            normalized(convert(window.mouseLocationOutsideOfEventStream, from: nil)) == nil { releaseFocus() }
     }
     func configureInput(enabled: Bool, keyboardMode: RemoteKeyboardMode,
-                        onInput: @escaping ([String: Any]) -> Void, onRelease: @escaping () -> Void) {
+                        onInput: @escaping ([String: Any]) -> Void, onRelease: @escaping () -> Void,
+                        clipboardPasteEnabled: Bool = false, onPaste: @escaping (@escaping () -> Bool) -> Void = { _ in }) {
         if inputEnabled && (!enabled || input.keyboardMode != keyboardMode) { releaseFocus() }
         inputEnabled = enabled; input.keyboardMode = keyboardMode
         input.onInput = onInput; input.onRelease = onRelease
+        self.clipboardPasteEnabled = clipboardPasteEnabled; self.onPaste = onPaste
         refreshContext(inside: input.insideVideo)
     }
     func replaceMailbox(_ value: FrameMailbox) {
@@ -110,6 +115,7 @@ final class VideoSurfaceView: NSView {
                       windowActive: window?.isKeyWindow == true && NSApp.isActive, insideVideo: inside)
     }
     private func releaseContext() {
+        focusGeneration &+= 1
         allowsMomentum = false
         input.context(enabled: inputEnabled, focused: false,
                       windowActive: window?.isKeyWindow == true && NSApp.isActive, insideVideo: false)
@@ -174,10 +180,26 @@ final class VideoSurfaceView: NSView {
         RemoteInputEngine.isSystemReserved(key: event.keyCode, command: event.modifierFlags.contains(.command),
                                           control: event.modifierFlags.contains(.control))
     }
+    private func clipboardKey(_ event: NSEvent) -> Bool {
+        guard clipboardPasteEnabled, RemoteInputEngine.isClipboardPaste(key: event.keyCode, mode: input.keyboardMode,
+            command: event.modifierFlags.contains(.command), control: event.modifierFlags.contains(.control),
+            shift: event.modifierFlags.contains(.shift), option: event.modifierFlags.contains(.option)) else { return false }
+        if event.isARepeat { return true }
+        // Clear held modifiers before the barrier exists. No V key is forwarded.
+        // A later ordinary event will resynchronize physical modifier flags.
+        input.releaseAll()
+        let generation = focusGeneration
+        onPaste { [weak self] in
+            guard let self, self.focusGeneration == generation else { return false }
+            return self.keyboardReady()
+        }
+        return true
+    }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard keyboardReady() else { return super.performKeyEquivalent(with: event) }
         if localKey(event) { return true }
         if reservedKey(event) { releaseFocus(); return super.performKeyEquivalent(with: event) }
+        if clipboardKey(event) { return true }
         guard event.modifierFlags.contains(.command), RemoteInputEngine.isCommandShortcut(event.keyCode) else {
             return super.performKeyEquivalent(with: event)
         }
@@ -189,6 +211,7 @@ final class VideoSurfaceView: NSView {
         guard keyboardReady() else { super.keyDown(with: event); return }
         if localKey(event) { return }
         if reservedKey(event) { releaseFocus(); super.keyDown(with: event); return }
+        if clipboardKey(event) { return }
         input.synchronizeModifiers(rawFlags: event.modifierFlags.rawValue)
         input.keyDown(event.keyCode, isRepeat: event.isARepeat)
     }
@@ -244,14 +267,18 @@ struct VideoSurface: NSViewRepresentable {
     var keyboardMode: RemoteKeyboardMode = .macFriendly
     var onInput: ([String: Any]) -> Void = { _ in }
     var onRelease: () -> Void = {}
+    var clipboardPasteEnabled = false
+    var onPaste: (@escaping () -> Bool) -> Void = { _ in }
     func makeNSView(context: Context) -> VideoSurfaceView {
         let view = VideoSurfaceView(mailbox: mailbox)
-        view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease)
+        view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease,
+                            clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste)
         return view
     }
     func updateNSView(_ view: VideoSurfaceView, context: Context) {
         if view.mailbox !== mailbox { view.replaceMailbox(mailbox) }
-        view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease)
+        view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease,
+                            clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste)
     }
     static func dismantleNSView(_ view: VideoSurfaceView, coordinator: ()) { view.stop() }
 }

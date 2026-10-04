@@ -1,1 +1,12 @@
-{"string":[{"name":"module_desc","value":"Screen capture and input authorization feasibility probe"}]}
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Screen capture and input authorization feasibility probe"
+    },
+    {
+      "name": "clipboard_permission_reason",
+      "value": "在你允许同步后，将此电脑新复制的文字同步到当前配对的 Mac；关闭同步或断开后停止。"
+    }
+  ]
+}

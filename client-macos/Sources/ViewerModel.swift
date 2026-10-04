@@ -73,6 +73,15 @@ final class ViewerModel: ObservableObject {
     @Published var inputEnabled = false
     @Published var inputSupported = false
     @Published var keyboardMode: RemoteKeyboardMode = .macFriendly
+    @Published var clipboardMode: ClipboardMode = ClipboardMode(rawValue: UserDefaults.standard.integer(forKey: "clipboardMode")) ?? .off
+    @Published var clipboardStatus = "剪贴板同步已关闭"
+    @Published var clipboardConnected = false
+    @Published var clipboardPasteEnabled = false
+    @Published var clipboardPullEnabled = false
+    private let clipboardAdapter = AppKitClipboardAdapter()
+    private lazy var clipboard = ClipboardCoordinator(adapter: clipboardAdapter)
+    private var clipboardChannel: ClipboardChannel?
+    private var clipboardTimer: Timer?
     @Published var mailbox = FrameMailbox()
     private var connection: LANConnection?
     private var pipeline: DecodePipeline?
@@ -86,6 +95,16 @@ final class ViewerModel: ObservableObject {
     private var sessionHost = ""
 
     init() {
+        clipboard.onChange = { [weak self] in self?.refreshClipboard() }
+        clipboard.onSend = { [weak self] frame in self?.clipboardChannel?.send(frame) }
+        clipboard.onCommit = { [weak self] epoch, event, operation, ttl in
+            guard let self, self.canControl, self.inputEnabled, let permit = self.clipboard.pastePermit else { return }
+            self.connection?.commitPaste(epoch: epoch, event: event, operation: operation, ttl: ttl, permit: permit)
+        }
+        let clipboardTimer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.clipboard.tick() }
+        }
+        self.clipboardTimer = clipboardTimer; RunLoop.main.add(clipboardTimer, forMode: .common)
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -104,6 +123,7 @@ final class ViewerModel: ObservableObject {
     }
 
     private func prepare(isReplay: Bool) -> (UUID, DecodePipeline) {
+        stopClipboard()
         replayCancellation?.cancel(); connection?.disconnect(); pipeline?.cancel()
         generation = UUID(); mailbox = FrameMailbox()
         let decoder = DecodePipeline(mailbox: mailbox); pipeline = decoder
@@ -143,6 +163,16 @@ final class ViewerModel: ObservableObject {
                 guard let self, self.generation == id else { return }
                 self.complete(id, decoder, result)
             }
+        }, onClipboardSession: { [weak self] session in
+            DispatchQueue.main.async {
+                guard let self, self.generation == id else { return }
+                if let session { self.startClipboard(session, generation: id) } else { self.stopClipboard() }
+            }
+        }, onPasteResult: { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.generation == id else { return }
+                self.clipboard.pasteResult(result)
+            }
         })
         connection = network
         UserDefaults.standard.set(address, forKey: "lastHost")
@@ -173,6 +203,7 @@ final class ViewerModel: ObservableObject {
     }
 
     func disconnect() {
+        stopClipboard()
         connection?.releaseInputs()
         generation = UUID(); replayCancellation?.cancel()
         connection?.disconnect(); pipeline?.cancel()
@@ -187,20 +218,57 @@ final class ViewerModel: ObservableObject {
         guard canControl else { return }
         let enabled = !inputEnabled
         connection?.requestInput(enabled: enabled)
-        if !enabled { inputEnabled = false }
+        if !enabled { clipboard.cancelPaste(); inputEnabled = false }
         detail = enabled ? "请先在鸿蒙端允许远程控制；启用后点击画面获得键盘焦点。" : "已关闭键鼠控制，继续查看画面。"
     }
 
     func sendInput(_ object: [String: Any]) {
         guard canControl && inputEnabled else { return }
+        clipboard.cancelPaste()
         connection?.sendInput(object)
     }
 
-    func releaseInputs() { connection?.releaseInputs() }
+    func releaseInputs() { clipboard.cancelPaste(); connection?.releaseInputs() }
+
+    private func startClipboard(_ session: ClipboardSession, generation id: UUID) {
+        stopClipboard(); clipboard.start(epoch: session.epoch, mode: clipboardMode)
+        let channel = ClipboardChannel(session: session, onReady: { [weak self] in
+            guard let self, self.generation == id else { return }; self.clipboard.ready()
+        }, onFrame: { [weak self] frame in
+            guard let self, self.generation == id else { return }
+            do { try self.clipboard.receive(frame) }
+            catch { self.stopClipboard(reason: "剪贴板协议错误，画面与输入继续") }
+        }, onFailure: { [weak self] failure in
+            guard let self, self.generation == id else { return }
+            self.stopClipboard(reason: "剪贴板通道不可用（\(failure.rawValue)），画面与输入继续")
+        })
+        clipboardChannel = channel; channel.start()
+    }
+    private func stopClipboard(reason: String = "剪贴板未连接") {
+        clipboardChannel?.close(); clipboardChannel = nil; clipboard.stop(reason: reason)
+    }
+    private func refreshClipboard() {
+        clipboardStatus = clipboard.status; clipboardConnected = clipboard.connected
+        clipboardPasteEnabled = clipboard.mode.sends // Consume paste even while permission/transport is unavailable.
+        clipboardPullEnabled = clipboard.canPull
+    }
+    func setClipboardMode(_ mode: ClipboardMode) {
+        if !clipboardMode.sends && mode.sends { clipboardAdapter.allowOneAutomaticReadAttempt() }
+        clipboardMode = mode; UserDefaults.standard.set(mode.rawValue, forKey: "clipboardMode")
+        clipboard.setMode(mode); refreshClipboard()
+    }
+    func pullClipboard() { clipboard.pull() }
+    func pasteClipboard(valid: @escaping () -> Bool) {
+        guard canControl, inputEnabled else { return }
+        clipboard.requestPaste(valid: { [weak self] in
+            guard let self else { return false }; return self.canControl && self.inputEnabled && valid()
+        })
+    }
 
     func changeKeyboardMode(_ mode: RemoteKeyboardMode) {
         // VideoSurface releases its physical state before adopting the new map.
         // Sending release_all here first would make its later key-ups unmatched.
+        if keyboardMode != mode { clipboard.cancelPaste() }
         keyboardMode = mode
     }
 
@@ -223,7 +291,7 @@ final class ViewerModel: ObservableObject {
 
     private func reportData() throws -> Data {
         let display = mailbox.statistics
-        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "result": lastResult,
+        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "appBuild": 5, "result": lastResult,
             "mode": replay ? "local_replay" : "live_lan", "host": replay ? "" : sessionHost,
             "startedAt": startedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "recordedAt": ISO8601DateFormatter().string(from: Date()),
@@ -232,6 +300,9 @@ final class ViewerModel: ObservableObject {
             "displayError": display.error, "dimensions": dimensions, "hardwareDecode": hardware,
             "inputControlMessagesSent": connection?.snapshot.inputSent ?? 0,
             "inputEnabledAtReport": inputEnabled,
+            "clipboardMode": clipboardMode.rawValue, "clipboardConnected": clipboardConnected,
+            "clipboardUpdatesSent": clipboard.sentCount, "clipboardUpdatesApplied": clipboard.appliedCount,
+            "clipboardPasteCommitted": clipboard.committedCount, "clipboardLastBytes": clipboard.lastBytes,
             "boundary": "Display submissions are not scanout timestamps. Replay uses synthetic pacing and does not prove live LAN. Input send counts do not prove target-app behavior. No end-to-end latency measurement."]
         return try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
     }

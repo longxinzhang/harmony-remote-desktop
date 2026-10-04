@@ -3,6 +3,8 @@
 
 #include "input_event.h"
 #include <memory>
+#include <functional>
+#include <chrono>
 #include <string>
 
 // User consent is separate from LAN authentication. All SDK calls run on one
@@ -20,6 +22,9 @@ public:
     // Clears queued events and releases held inputs before later submissions.
     // Preserves an enabled session only when cleanup succeeds.
     void ReleaseAll();
+    // Runs on the input worker. Returns only after the complete independent Ctrl+V
+    // stroke, or cancellation. The validator runs again immediately before injection.
+    bool Paste(std::function<bool()> validate, std::chrono::steady_clock::time_point deadline);
     std::string SnapshotJson() const;
 
 private:

@@ -36,6 +36,11 @@ final class LANConnection {
     private let onStatus: (String) -> Void
     private let onPacket: (VideoPacket) -> Void
     private let onEnd: (Result<Void, Error>) -> Void
+    private let onClipboardSession: (ClipboardSession?) -> Void
+    private let onPasteResult: ([String: Any]) -> Void
+    private var clipboardAdvertised = false
+    private var clipboardPort: UInt16 = 39873
+    private var clipboardEpoch = ""
     private var control: NWConnection?
     private var video: NWConnection?
     private var timer: DispatchSourceTimer?
@@ -58,6 +63,7 @@ final class LANConnection {
         let connection: NWConnection
         let run: UInt64
         let input: Bool
+        let pastePermit: ClipboardPastePermit?
     }
     private var pendingSends: [PendingSend] = []
     private var sendInFlight = false
@@ -75,21 +81,28 @@ final class LANConnection {
     private var testLoopback = false
     private var testSessionClock: (() -> TimeInterval)?
     private var testDisableTimer = false
+    private var testPauseSends = false
     #endif
 
     init(onStatus: @escaping (String) -> Void, onPacket: @escaping (VideoPacket) -> Void,
-         onEnd: @escaping (Result<Void, Error>) -> Void) {
+         onEnd: @escaping (Result<Void, Error>) -> Void,
+         onClipboardSession: @escaping (ClipboardSession?) -> Void = { _ in },
+         onPasteResult: @escaping ([String: Any]) -> Void = { _ in }) {
         self.onStatus = onStatus
         self.onPacket = onPacket
         self.onEnd = onEnd
+        self.onClipboardSession = onClipboardSession; self.onPasteResult = onPasteResult
     }
 
     #if HRD_NETWORK_TESTING
     convenience init(testControlPort: UInt16, testVideoPort: UInt16,
                      testSessionClock: (() -> TimeInterval)? = nil, testDisableTimer: Bool = false,
                      onStatus: @escaping (String) -> Void, onPacket: @escaping (VideoPacket) -> Void,
-                     onEnd: @escaping (Result<Void, Error>) -> Void) {
-        self.init(onStatus: onStatus, onPacket: onPacket, onEnd: onEnd)
+                     onEnd: @escaping (Result<Void, Error>) -> Void,
+                     onClipboardSession: @escaping (ClipboardSession?) -> Void = { _ in },
+                     onPasteResult: @escaping ([String: Any]) -> Void = { _ in }) {
+        self.init(onStatus: onStatus, onPacket: onPacket, onEnd: onEnd,
+                  onClipboardSession: onClipboardSession, onPasteResult: onPasteResult)
         self.controlPort = testControlPort
         self.videoPort = testVideoPort
         self.testLoopback = true
@@ -138,6 +151,23 @@ final class LANConnection {
         enqueueInput(object)
     }
     func releaseInputs() { enqueueInput(["type": "release_all_keys"]) }
+
+    func commitPaste(epoch: String, event: String, operation: String, ttl: Int, permit: ClipboardPastePermit) {
+        queue.async { [weak self] in
+            guard let self, self.active, self.clipboardEpoch == epoch, self.snapshot.inputEnabled,
+                  let token = self.token, let control = self.control,
+                  ClipboardWire.validEventID(event), ClipboardWire.hex(operation, length: 32), (1...1500).contains(ttl),
+                  permit.remainingMilliseconds() != nil else { return }
+            self.send(["type": "paste_commit", "sessionToken": token, "clipboardEpoch": epoch,
+                       "eventId": event, "operationId": operation, "ttlMs": ttl], on: control, run: self.generation, pastePermit: permit)
+        }
+    }
+    #if HRD_NETWORK_TESTING
+    // Simulates an occupied control writer without changing the production queue.
+    func pauseControlWriterForTest(_ paused: Bool, completion: @escaping () -> Void) {
+        queue.async { self.testPauseSends = paused; if !paused { self.pumpSend() }; completion() }
+    }
+    #endif
 
     static func validInput(_ object: [String: Any]) -> Bool {
         func number(_ key: String, _ low: Double, _ high: Double) -> Bool {
@@ -215,6 +245,7 @@ final class LANConnection {
         self.host = host
         self.pin = pin
         token = nil
+        clipboardAdvertised = false; clipboardEpoch = ""
         parser = WireVideoParser(maxTotalBytes: nil)
         sends.removeAll()
         pendingSends.removeAll(); sendInFlight = false
@@ -294,27 +325,40 @@ final class LANConnection {
         }
     }
 
-    private func send(_ object: [String: Any], on connection: NWConnection, run: UInt64, input: Bool = false) {
+    private func send(_ object: [String: Any], on connection: NWConnection, run: UInt64, input: Bool = false,
+                      pastePermit: ClipboardPastePermit? = nil) {
         guard isCurrent(run) else { return }
         do {
             let frame = try WireProtocol.controlFrame(object)
             guard pendingSends.count + (sendInFlight ? 1 : 0) < 128 else {
                 end(.failure(LANError.protocolViolation("控制发送队列已满")), generation: run); return
             }
-            pendingSends.append(PendingSend(data: frame, connection: connection, run: run, input: input))
+            pendingSends.append(PendingSend(data: frame, connection: connection, run: run, input: input, pastePermit: pastePermit))
             pumpSend()
         } catch { end(.failure(error), generation: run) }
     }
 
     private func pumpSend() {
+        #if HRD_NETWORK_TESTING
+        if testPauseSends { return }
+        #endif
         guard !sendInFlight, !pendingSends.isEmpty else { return }
         let item = pendingSends.removeFirst()
         guard isCurrent(item.run) else { return }
+        var outgoing = item.data
+        if let permit = item.pastePermit {
+            guard let remaining = permit.remainingMilliseconds() else { pumpSend(); return }
+            do {
+                var object = try WireProtocol.controlObject(Data(item.data.dropFirst(4)))
+                object["ttlMs"] = remaining
+                outgoing = try WireProtocol.controlFrame(object)
+            } catch { end(.failure(error), generation: item.run); return }
+        }
         sendInFlight = true
         nextSend &+= 1
         let sendID = nextSend
         sends[sendID] = ProcessInfo.processInfo.systemUptime
-        item.connection.send(content: item.data, completion: .contentProcessed { [weak self] error in
+        item.connection.send(content: outgoing, completion: .contentProcessed { [weak self] error in
             guard let self, self.isCurrent(item.run) else { return }
             self.sends.removeValue(forKey: sendID)
             self.sendInFlight = false
@@ -379,6 +423,13 @@ final class LANConnection {
                   WireProtocol.isBoolean(object["nativePtsUnitVerified"], false) else {
                 self.end(.failure(LANError.protocolViolation("Host hello 不兼容")), generation: run); return
             }
+            let advertisedPort = ClipboardWire.integer(object["clipboardPort"], range: 1...65535)
+            var allowedPort = advertisedPort == 39873
+            #if HRD_NETWORK_TESTING
+            if self.testLoopback && advertisedPort != nil { allowedPort = true }
+            #endif
+            self.clipboardAdvertised = WireProtocol.isBoolean(object["clipboardSupported"], true) && allowedPort
+            self.clipboardPort = UInt16(advertisedPort ?? 39873)
             let supported = WireProtocol.isBoolean(object["inputSupported"], true)
             self.updateSnapshot { $0.inputSupported = supported }
             self.send(["type": "pair", "pin": self.pin], on: control, run: run)
@@ -389,6 +440,12 @@ final class LANConnection {
                 guard object["type"] as? String == "pair_ok", let token = object["sessionToken"] as? String,
                       WireProtocol.validToken(token) else { self.end(.failure(LANError.hostRejected), generation: run); return }
                 self.token = token
+                if self.clipboardAdvertised,
+                   let epoch = object["clipboardEpoch"] as? String, ClipboardWire.hex(epoch, length: 32),
+                   let binding = object["clipboardBindToken"] as? String, ClipboardWire.hex(binding, length: 64) {
+                    self.clipboardEpoch = epoch
+                    self.onClipboardSession(ClipboardSession(host: self.host, epoch: epoch, binding: binding, port: self.clipboardPort))
+                }
                 self.updateSnapshot { $0.paired = true }
                 self.lastHeartbeat = ProcessInfo.processInfo.systemUptime
                 self.nextPing = self.lastHeartbeat + 2
@@ -418,6 +475,15 @@ final class LANConnection {
                 let enabled = WireProtocol.isBoolean(object["enabled"], true)
                 self.updateSnapshot { $0.inputEnabled = enabled }
                 self.onStatus(enabled ? "远程输入已启用" : "远程输入已关闭")
+            case "paste_result":
+                guard ClipboardWire.hex(object["operationId"], length: 32),
+                      Set(object.keys) == Set(["type", "sessionToken", "operationId", "status", "error"]),
+                      let status = object["status"] as? String, ["committed", "stale", "denied", "failed"].contains(status),
+                      let error = object["error"] as? String, error.utf8.count <= 128, error.utf8.allSatisfy({ $0 >= 32 && $0 < 127 }) else {
+                    // A malformed clipboard extension must not end screen sharing.
+                    self.onClipboardSession(nil); break
+                }
+                self.onPasteResult(object)
             case "stop", "error", "display_changed": self.end(.failure(LANError.hostRejected), generation: run); return
             default: self.end(.failure(LANError.protocolViolation("未知控制消息")), generation: run); return
             }
@@ -498,6 +564,7 @@ final class LANConnection {
     private func end(_ result: Result<Void, Error>, generation run: UInt64) {
         guard isCurrent(run) else { return }
         active = false
+        clipboardEpoch = ""; clipboardAdvertised = false; onClipboardSession(nil)
         resetInput(run: nil)
         pendingSends.removeAll(); sendInFlight = false
         updateSnapshot { $0.inputEnabled = false }

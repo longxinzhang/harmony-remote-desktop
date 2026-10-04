@@ -336,6 +336,33 @@ int main(int argc, char** argv)
         unsigned int count = 0;
         auto test = [&](const char* name, const std::function<void()>& body) { body(); ++count; std::cout << "PASS " << name << '\n'; };
 
+        test("clipboard optional handshake and paste auth gating bounded operation dedup", [] {
+            InputMock input; Fixture f; f.server.Stop(); f.server.SetInputHooks(input.Hooks());
+            int commits = 0, disconnects = 0; LanClipboardHooks hooks;
+            hooks.start = [](const std::string&) { return true; }; hooks.stop = [] {}; hooks.port = [] { return uint16_t(39873); };
+            hooks.pair = [](std::string& epoch, std::string& token) { epoch = std::string(32, 'a'); token = std::string(64, 'b'); return true; };
+            hooks.disconnect = [&] { ++disconnects; };
+            hooks.paste = [&](const std::string& epoch, const std::string& event, auto deadline) {
+                CHECK(epoch == std::string(32, 'a') && event == "mac-1"); CHECK(deadline > std::chrono::steady_clock::now());
+                ++commits; return std::make_pair(std::string("committed"), std::string()); };
+            f.server.SetClipboardHooks(std::move(hooks)); CHECK(f.server.Start("127.0.0.1") == 0);
+            const auto snapshot = f.server.SnapshotJson(true); f.cp = uint16_t(Number(snapshot, "controlPort")); f.vp = uint16_t(Number(snapshot, "videoPort")); f.pin = String(snapshot, "pin");
+            auto control = Connect(f.cp); Json(control, "{\"type\":\"hello\",\"protocol\":1}"); auto hello = ReadJson(control);
+            CHECK(True(hello, "clipboardSupported") && Number(hello, "clipboardPort") == 39873);
+            Json(control, "{\"type\":\"pair\",\"pin\":\"" + f.pin + "\"}"); auto pair = ReadJson(control);
+            CHECK(String(pair, "clipboardEpoch") == std::string(32, 'a') && String(pair, "clipboardBindToken") == std::string(64, 'b'));
+            Client c; c.control = std::move(control); c.token = String(pair, "sessionToken");
+            auto paste = [&](char operation, int ttl = 1000) { return Input(c, "paste_commit", ",\"clipboardEpoch\":\"" + std::string(32, 'a') +
+                "\",\"eventId\":\"mac-1\",\"operationId\":\"" + std::string(32, operation) + "\",\"ttlMs\":" + std::to_string(ttl)); };
+            Json(c.control, paste('1')); CHECK(String(ReadJson(c.control), "status") == "denied"); CHECK(commits == 0);
+            Attach(f, c); ConfigAndIdr(f, c); Enable(c);
+            Json(c.control, paste('2')); CHECK(String(ReadJson(c.control), "status") == "committed"); CHECK(commits == 1);
+            Json(c.control, paste('2')); auto duplicate = ReadJson(c.control); CHECK(String(duplicate, "error") == "duplicate_operation" && commits == 1);
+            Json(c.control, paste('3', 1501)); CHECK(String(ReadJson(c.control), "status") == "failed" && commits == 1);
+            Json(c.control, Input(c, "input_enable", ",\"enabled\":false")); CHECK(!True(ReadJson(c.control), "enabled"));
+            Json(c.control, paste('4')); CHECK(String(ReadJson(c.control), "status") == "denied" && commits == 1);
+            Json(c.control, Auth(c, "stop")); CHECK(Closed(c.control)); Wait([&] { return disconnects > 0; });
+        });
         test("input enable requires ready stream and first accepted video AU", [] {
             InputMock input; Fixture f; f.server.SetInputHooks(input.Hooks());
             auto socket = Connect(f.cp); Json(socket, "{\"type\":\"hello\",\"protocol\":1}");

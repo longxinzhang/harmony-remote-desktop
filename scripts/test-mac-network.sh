@@ -17,6 +17,7 @@ swiftc -swift-version 5 -O -warnings-as-errors \
   -module-cache-path "$test_build_dir/module-cache" -D HRD_NETWORK_TESTING \
   -framework Network \
   "$project_dir/client-macos/Sources/WireProtocol.swift" \
+  "$project_dir/client-macos/Sources/ClipboardProtocol.swift" \
   "$project_dir/client-macos/Sources/LANConnection.swift" \
   "$project_dir/tests/mac_network_test.swift" \
   -o "$test_build_dir/mac-network-tests"

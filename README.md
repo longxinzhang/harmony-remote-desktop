@@ -1,6 +1,6 @@
-# Harmony Remote Desktop — 0.5.0 十分钟调试与永久上线
+# Harmony Remote Desktop — 0.5.0 纯文字剪贴板
 
-面向 HarmonyOS PC / API 26 的原生局域网远程桌面工程，开发机为 macOS。**0.5.0 已构建并安装、启动，部署由 [build-verification-0.5.0](artifacts/build-verification-0.5.0.json) 记录**。LAN 共享只提供“10 分钟调试”和“永久上线”，默认永久；两种模式都不保存桌面录像。永久模式取消活动视频会话的固定时长和累计 2 GiB 接收限制，直到用户停止、连接中断、关闭应用或发生错误。
+面向 HarmonyOS PC / API 26 的原生局域网远程桌面工程，开发机为 macOS。当前 **0.5.0 剪贴板构建（Host `1000008` / Mac `5`）**新增双向纯文字同步，Host 已签名、安装并启动，Mac 已构建、校验签名并更新常用启动入口；**真实读取授权与双向粘贴尚待验收**，见[剪贴板验证记录](docs/CLIPBOARD_TEST_RESULTS.md)。LAN 共享仍只提供“10 分钟调试”和“永久上线”，默认永久；两种模式都不保存桌面录像。永久模式取消活动视频会话的固定时长和累计 2 GiB 接收限制，直到用户停止、连接中断、关闭应用或发生错误。
 
 **永久模式长期真机验收尚未完成，完整输入矩阵也未通过**。0.4.1 的五分钟查看、窗口拖动、文字拖选及松手停止已有独立实机证据；0.4.0 的英文输入、右键菜单和 `⌘L` 也有历史确认。以下分别记录当前行为与历史结果。
 
@@ -8,8 +8,10 @@
 
 ## 当前状态
 
-- **0.5.0 构建与开发验证完成**：Host 和 Mac 完整构建通过；原生会话策略、编码计时回归、实际 API 26 对象编译通过，Mac 网络测试 **105 项**通过，含真实 C++ / NWConnection 联动、模拟长期活动会话和分批累计超过 2 GiB 的检查。见 [原生验证](artifacts/encoder-native-verification-0.5.0.json)、[Mac 网络日志](artifacts/mac-network-tests-permanent-mode.log) 与 [构建及部署记录](artifacts/build-verification-0.5.0.json)。这些是本机开发检查，不是永久模式真机长期运行证明。
-- **0.5.0 部署及空闲启动已核对**：Host versionCode `1000007` 已安装启动，初始模式 `permanent`、服务 `STOPPED`、编码 idle、无持有输入；Mac 常用 App 已同步、签名校验通过并启动。模式切换后的进程重启记忆、十分钟自动 EOS 和永久模式长期硬件运行仍待实机验证。
+- **当前剪贴板构建**：四种模式为关闭、Mac → 鸿蒙、鸿蒙 → Mac、双向；首次默认关闭，Mac 记住方向偏好，Host 另有本地允许开关，不会随 Mac 方向选择自动开启。开启、重连或切换方向不发送原有剪贴板。单次最多 **1 MiB UTF-8 纯文字**，不保留排版；文件、文件粘贴、图片后续实现。开发检查与未完成真机项目见[剪贴板验证记录](docs/CLIPBOARD_TEST_RESULTS.md)。
+- **本轮开发验证通过**：Native 剪贴板 24 项、LAN 32 项、输入 37 项；Mac 剪贴板 39 项、网络 105 项、输入 21 项。最终 HAP 的签名 Profile 已含 READ_PASTEBOARD，Host 启动和 Mac 四方向菜单检查均确认默认关闭。这些不替代系统运行时授权和真实双向粘贴观察。
+- **此前 0.5.0 会话模式基线验证**：Host 和 Mac 完整构建通过；原生会话策略、编码计时回归、实际 API 26 对象编译通过，Mac 网络测试 **105 项**通过，含真实 C++ / NWConnection 联动、模拟长期活动会话和分批累计超过 2 GiB 的检查。见 [原生验证](artifacts/encoder-native-verification-0.5.0.json)、[Mac 网络日志](artifacts/mac-network-tests-permanent-mode.log) 与 [基线构建及部署记录](artifacts/build-verification-0.5.0.json)。这些是本机开发检查，不是永久模式真机长期运行证明。
+- **此前会话模式基线部署及空闲启动已核对**：Host versionCode `1000007` 当时已安装启动，初始模式 `permanent`、服务 `STOPPED`、编码 idle、无持有输入；Mac 常用 App 当时已同步、签名校验通过并启动。模式切换后的进程重启记忆、十分钟自动 EOS 和永久模式长期硬件运行仍待实机验证。
 
 | LAN 模式 | 结束条件 | Host 页面 |
 | --- | --- | --- |
@@ -17,6 +19,14 @@
 | 永久在线（0，默认） | 无自动结束时间；停止、断线、应用关闭或错误时结束 | 隐藏动态图案与开发面板 |
 
 Host 通过 `PersistentStorage` 的 `hrdSessionMode` 只记住模式选择，不保存授权、允许远程控制状态、PIN 或 token，也不会自动配对或共享。两种 LAN 模式都不保存 H.264。`LISTENING` 在界面显示为“在线，等待连接”，协议和诊断状态枚举不变。Mac 等待首个有效非空 AU 最多 32 分钟；首 AU 到达后无固定总时长或累计字节上限，心跳、组包、单包、队列及解码在飞限制仍生效。本地开发回放仍限制 64 MiB，见 [协议](docs/PROTOCOL.md)。
+
+## 使用纯文字剪贴板
+
+1. 两端使用上述剪贴板构建，在可信局域网中由 Host **Start Server**，Mac 输入地址和 PIN 配对。共享画面仍需 Host 手动发起并确认系统录屏授权。
+2. Host 点击 **允许读取剪贴板**并完成系统授权（鸿蒙 → Mac 所需），再点击 **允许剪贴板同步**；Mac 选择所需方向。默认不读取或交换原有内容，之后重新复制文字才触发同步；**获取远端文字**是显式拉取当前内容。
+3. 普通同步只更新另一端剪贴板。若要在远端应用粘贴，另需 Host 授权输入、双方启用远程控制并将焦点置于 Mac 画面；Mac → 鸿蒙开启时，`⌘V` / `Ctrl+V` 等待远端写入确认后才发送一次粘贴按键。失败或失焦会取消，不回落为粘贴旧内容。
+
+`READ_PASTEBOARD` 需要签名 Profile 中的 ACL 及运行时用户授权；声明权限或成功构建均不等于授权成功。Mac 也可能要求系统剪贴板访问许可。见[权限与能力边界](docs/PLATFORM_CAPABILITIES.md)及[剪贴板协议](docs/CLIPBOARD_WIRE.md)。控制、视频与剪贴板仍为可信局域网明文传输；诊断不保存剪贴板文本、文本摘要或配对凭据。
 
 ## 历史实机证据与未完成验收
 
@@ -44,7 +54,7 @@ Host 通过 `PersistentStorage` 的 `hrdSessionMode` 只记住模式选择，不
 
 ## 构建与安装
 
-本机常用启动路径 `client-macos/build/HarmonyRemote.app` 已同步为 **0.5.0**；签名、源码指纹和 Host 部署状态见 [0.5.0 构建及部署记录](artifacts/build-verification-0.5.0.json)。从项目根目录运行 `open -n client-macos/build/HarmonyRemote.app`。本版归档：[Mac ZIP](artifacts/releases/0.5.0/HarmonyRemote-Mac-0.5.0.zip)、[Host HAP](artifacts/releases/0.5.0/HarmonyRemote-Host-0.5.0.hap)。已验收的 0.4.1 历史归档仍保留在 `artifacts/releases/0.4.1/mac-build/HarmonyRemote.app`，ZIP 位于其上一层。
+本机常用启动路径为 `client-macos/build/HarmonyRemote.app`，从项目根目录运行 `open -n client-macos/build/HarmonyRemote.app`。剪贴板构建需核对 Host `1000008` / Mac `5`，状态见[剪贴板验证记录](docs/CLIPBOARD_TEST_RESULTS.md)。此前会话模式基线的签名、源码指纹和部署见 [0.5.0 基线构建记录](artifacts/build-verification-0.5.0.json)，原归档 [Mac ZIP](artifacts/releases/0.5.0/HarmonyRemote-Mac-0.5.0.zip)、[Host HAP](artifacts/releases/0.5.0/HarmonyRemote-Host-0.5.0.hap) 保留，不将它们当作新增剪贴板的产物。已验收的 0.4.1 历史归档仍保留在 `artifacts/releases/0.4.1/mac-build/HarmonyRemote.app`，ZIP 位于其上一层。
 
 在项目目录运行：
 

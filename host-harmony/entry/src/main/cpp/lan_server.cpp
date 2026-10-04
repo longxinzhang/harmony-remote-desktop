@@ -1,4 +1,5 @@
 #include "lan_server.h"
+#include "clipboard_wire.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -453,6 +454,9 @@ struct LanServer::Impl {
     std::mutex mutex;
     std::mutex inputMutex; // Lock order: inputMutex, then mutex. External hooks never hold mutex.
     LanInputHooks inputHooks;
+    LanClipboardHooks clipboardHooks;
+    bool clipboardStarted = false;
+    std::deque<std::string> pasteOperations;
     bool inputEnabled = false, inputDeactivatePending = false, inputStatusPending = false;
     uint64_t inputAccepted = 0, inputRejected = 0, inputReleases = 0;
     Time lastInputPoll {};
@@ -585,6 +589,9 @@ struct LanServer::Impl {
     void Disconnect(const std::string& reason, bool allowCompletedEos = false)
     {
         DisableInput();
+        LanClipboardHooks clipboard;
+        { std::lock_guard<std::mutex> lock(mutex); clipboard = clipboardHooks; pasteOperations.clear(); }
+        try { if (clipboard.disconnect) clipboard.disconnect(); } catch (...) {}
         Sock oldControl, oldVideo;
         {
             std::unique_lock<std::mutex> lock(mutex);
@@ -623,6 +630,9 @@ struct LanServer::Impl {
         cv.notify_all();
         if (network.joinable()) network.join();
         if (sender.joinable()) sender.join();
+        LanClipboardHooks clipboard;
+        { std::lock_guard<std::mutex> lock(mutex); clipboard = clipboardHooks; clipboardStarted = false; }
+        try { if (clipboard.stop) clipboard.stop(); } catch (...) {}
         // A final sweep covers a worker finishing an accept during shutdown.
         Disconnect("", true);
         std::lock_guard<std::mutex> lock(mutex);
@@ -689,7 +699,8 @@ struct LanServer::Impl {
                 hello = true;
                 { std::lock_guard<std::mutex> lock(mutex); status = "AWAITING_PAIR"; }
                 bool supported; { std::lock_guard<std::mutex> lock(mutex); supported = InputSupportedLocked(); }
-                return SendJson(socket, "{\"type\":\"hello_ack\",\"protocol\":1,\"deviceName\":\"HarmonyOS-PC\",\"os\":\"HarmonyOS 7\",\"pairingRequired\":true,\"timestampSource\":\"encoder_callback_monotonic\",\"nativePtsUnitVerified\":false,\"inputSupported\":" + std::string(supported ? "true" : "false") + "}", options.ioTimeoutMs, running);
+                return SendJson(socket, "{\"type\":\"hello_ack\",\"protocol\":1,\"deviceName\":\"HarmonyOS-PC\",\"os\":\"HarmonyOS 7\",\"pairingRequired\":true,\"timestampSource\":\"encoder_callback_monotonic\",\"nativePtsUnitVerified\":false,\"inputSupported\":" + std::string(supported ? "true" : "false") + ",\"clipboardSupported\":" + (clipboardStarted ? "true" : "false") +
+                    (clipboardStarted ? ",\"clipboardPort\":" + std::to_string(clipboardHooks.port()) : "") + "}", options.ioTimeoutMs, running);
             }
             if (type != "pair") { ReplyError(socket, "pair_required"); return false; }
             std::string failure;
@@ -710,13 +721,48 @@ struct LanServer::Impl {
                 if (!running.load()) return false;
                 pinUsed = true; pin.clear(); token = session; paired = true; status = "PAIRED";
             }
+            std::string clipboardFields;
+            if (clipboardStarted && clipboardHooks.pair) {
+                std::string clipboardEpoch, bindToken;
+                if (clipboardHooks.pair(clipboardEpoch, bindToken)) clipboardFields =
+                    ",\"clipboardEpoch\":" + Quote(clipboardEpoch) + ",\"clipboardBindToken\":" + Quote(bindToken);
+            }
             lastRx = lastPing = Clock::now();
-            return SendJson(socket, "{\"type\":\"pair_ok\",\"sessionToken\":" + Quote(session) + "}", options.ioTimeoutMs, running);
+            return SendJson(socket, "{\"type\":\"pair_ok\",\"sessionToken\":" + Quote(session) + clipboardFields + "}", options.ioTimeoutMs, running);
         }
         if (session.empty() || !SecretEqual(Field(object, "sessionToken"), session)) {
             ReplyError(socket, "invalid_session"); return false;
         }
         if (type == "stop") { cleanStop = true; return false; }
+        if (type == "paste_commit") {
+            lastRx = Clock::now();
+            uint64_t ttl = 0;
+            const auto operation = Field(object, "operationId");
+            auto ttlField = object.find("ttlMs");
+            const bool valid = object.size() == 6 && clipboard_wire::Hex(operation, 32) &&
+                clipboard_wire::Hex(Field(object, "clipboardEpoch"), 32) &&
+                ttlField != object.end() && !ttlField->second.isString && clipboard_wire::Decimal(ttlField->second.text, ttl) && ttl >= 1 && ttl <= 1500 &&
+                !Field(object, "eventId").empty() && Field(object, "eventId").size() <= 32;
+            std::pair<std::string, std::string> result {"denied", "input_or_clipboard_disabled"};
+            if (!valid) result = {"failed", "invalid_paste_commit"};
+            else {
+                // Bound history and one serialized paste operation; hooks never hold server state mutex.
+                std::lock_guard<std::mutex> gate(inputMutex);
+                bool allowed = false, duplicate = false; LanClipboardHooks clipboard; LanInputHooks input;
+                { std::lock_guard<std::mutex> lock(mutex);
+                  duplicate = std::find(pasteOperations.begin(), pasteOperations.end(), operation) != pasteOperations.end();
+                  if (!duplicate) { pasteOperations.push_back(operation); if (pasteOperations.size() > 64) pasteOperations.pop_front(); }
+                  allowed = inputEnabled && paired && streaming && hasAu && !cancelled.load() && !eosQueued && !disconnectRequested;
+                  clipboard = clipboardHooks; input = inputHooks; }
+                if (duplicate) result = {"denied", "duplicate_operation"};
+                else if (allowed && input.enabled && input.enabled() && clipboard.paste) {
+                    try { result = clipboard.paste(Field(object, "clipboardEpoch"), Field(object, "eventId"), lastRx + std::chrono::milliseconds(ttl)); }
+                    catch (...) { result = {"failed", "paste_worker_failed"}; }
+                }
+            }
+            return SendJson(socket, "{\"type\":\"paste_result\",\"sessionToken\":" + Quote(session) +
+                ",\"operationId\":" + Quote(operation) + ",\"status\":" + Quote(result.first) + ",\"error\":" + Quote(result.second) + "}", options.ioTimeoutMs, running);
+        }
         if (type == "input_enable" || type == "release_all_keys" || type == "mouse_move" || type == "mouse_button" || type == "scroll" || type == "key") {
             lastRx = Clock::now(); return HandleInput(socket, object, type);
         }
@@ -882,6 +928,9 @@ int LanServer::Start(const std::string& bindAddress)
         s.sentFrames = s.sentBytes = s.sentPackets = s.abortedStreams = 0; s.queueHighWater = 0;
         s.eosQueued = false; s.eosSent = false; s.encoderEndedSuccess = false; s.streamCompleted = false;
     }
+    // Clipboard listener failure leaves the existing video/input service available.
+    try { s.clipboardStarted = s.clipboardHooks.start && s.clipboardHooks.port && s.clipboardHooks.pair &&
+        s.clipboardHooks.start(address); } catch (...) { s.clipboardStarted = false; }
     try {
         s.sender = std::thread([&s] { try { s.SenderLoop(); } catch (...) { s.WorkerFailed(); } });
         s.network = std::thread([&s] { try { s.NetworkLoop(); } catch (...) { s.WorkerFailed(); } });
@@ -904,6 +953,13 @@ void LanServer::SetInputHooks(LanInputHooks hooks)
     std::lock_guard<std::mutex> gate(impl_->inputMutex);
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->inputHooks = std::move(hooks);
+}
+
+void LanServer::SetClipboardHooks(LanClipboardHooks hooks)
+{
+    std::lock_guard<std::mutex> lifecycle(impl_->lifecycle);
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->running.load()) impl_->clipboardHooks = std::move(hooks);
 }
 
 bool LanServer::BeginStream()

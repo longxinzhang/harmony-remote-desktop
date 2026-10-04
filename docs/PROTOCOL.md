@@ -1,14 +1,14 @@
-# LAN video and input protocol — version 1
+# LAN video, input and clipboard protocol — version 1
 
-本文定义 **0.5.0** 使用的线上格式：Harmony 硬件编码通过视频 TCP 连接传输到 Mac Viewer；独立控制 TCP 连接承担配对、心跳及可撤销的远程输入。协议版本仍为 **1**，HRD1 视频格式与 0.3.x 兼容，输入格式沿用 0.4.0、由 hello capability 协商。0.5.0 已构建并安装、启动，部署由 [build-verification-0.5.0](../artifacts/build-verification-0.5.0.json) 记录；十分钟完整共享、永久模式长期运行尚未真机验收。
+本文定义 **0.5.0 剪贴板构建（Host `1000008` / Mac `5`）**使用的线上格式：Harmony 硬件编码通过视频 TCP 连接传输到 Mac Viewer；独立控制 TCP 连接承担配对、心跳及可撤销的远程输入，协商后第三条连接承担纯文字剪贴板。协议版本仍为 **1**，HRD1 视频格式与 0.3.x 兼容，输入格式沿用 0.4.0、由 hello capability 协商。当前剪贴板构建、安装与验收状态见[剪贴板验证记录](CLIPBOARD_TEST_RESULTS.md)；此前 [0.5.0 会话模式基线部署记录](../artifacts/build-verification-0.5.0.json) 不代表本轮剪贴板已验收。十分钟完整共享、永久模式长期运行尚未真机验收。
 
 0.4.0 已实机确认文字输入、右键菜单和 `⌘L`，0.4.1 已确认窗口拖动、文字拖选与松手停止；这些历史结果不等于完整输入或长期稳定性验收，见 [拖拽证据](../artifacts/device/drag-0-4-1-verified/drag-review.json)。本机协议测试与真机结果分别记录。
 
 ## 范围与启动
 
-- 仅用于可信局域网原型。控制与视频均为**明文 TCP**，PIN/session 校验不提供加密或抵御局域网窃听。正式版本的 TLS 1.3、设备证书、持久身份尚未实现。
+- 仅用于可信局域网原型。控制、视频与剪贴板均为**明文 TCP**，PIN/session 校验不提供加密或抵御局域网窃听。正式版本的 TLS 1.3、设备证书、持久身份尚未实现。
 - 不使用端口转发、公网暴露、UPnP、NAT-PMP。Mac 客户端只接受 RFC1918 IPv4：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`，不解析主机名。
-- Host 未点击 **Start Server** 时不监听。控制端口 `39871/TCP`，视频端口 `39872/TCP`；只允许一个配对客户端，已有会话时拒绝新客户端。
+- Host 未点击 **Start Server** 时不监听。控制端口 `39871/TCP`，视频端口 `39872/TCP`，新增独立剪贴板端口 `39873/TCP`；只允许一个配对客户端，已有会话时拒绝新客户端。剪贴板监听失败不停止原有视频/输入服务，Host 只在就绪时宣告该 capability。
 - Host 的 API 26 模块已声明 `ohos.permission.INTERNET`。这与用户另行确认系统录屏授权是不同的能力边界。
 - 每次 Start 生成新的 6 位随机数字 PIN，5 分钟过期、成功后单次消费；最多 5 次错误尝试。PIN 不得硬编码。
 - 成功配对生成密码学随机的 256-bit token，以 64 位十六进制字符串传输，仅当前会话有效；断线/Stop 后失效。不实现永久设备信任。
@@ -37,7 +37,7 @@ payloadLength bytes, UTF-8 JSON object
 {"type":"hello_ack","protocol":1,"pairingRequired":true,"timestampSource":"encoder_callback_monotonic","nativePtsUnitVerified":false,"inputSupported":true}
 ```
 
-`hello_ack` 可以附加设备名称等非敏感字段；客户端必须检查上述版本与时间戳语义。仅安装完整输入 hooks 的 Host 报 `inputSupported:true`。旧 Host 缺少此字段时 Mac 只看画面； capability 不代表用户已授权输入。
+`hello_ack` 可以附加设备名称等非敏感字段；客户端必须检查上述版本与时间戳语义。仅安装完整输入 hooks 的 Host 报 `inputSupported:true`。旧 Host 缺少此字段时 Mac 只看画面； capability 不代表用户已授权输入。新增剪贴板能力用可选 `clipboardSupported:true`、`clipboardPort:39873` 协商；新客户端只在有效 capability 存在时开第三条连接，旧客户端可忽略新增字段。
 
 ```json
 {"type":"pair","pin":"<6 ASCII digits>"}
@@ -47,7 +47,7 @@ payloadLength bytes, UTF-8 JSON object
 {"type":"pair_ok","sessionToken":"<64 hex characters>"}
 ```
 
-PIN 通过 Mac GUI 隐藏输入框、CLI 终端隐藏输入或显式的受控 stdin 获取，不作为 argv/env，不写日志或报告；GUI 提交后清空输入框。PIN 与 token 只保存在当前会话内存中，是唯一必要的认证材料，不需要客户端传递设备标识、屏幕内容或其他身份数据。
+PIN 通过 Mac GUI 隐藏输入框、CLI 终端隐藏输入或显式的受控 stdin 获取，不作为 argv/env，不写日志或报告；GUI 提交后清空输入框。PIN 与 token 只保存在当前会话内存中；剪贴板就绪时，`pair_ok` 另附 `clipboardEpoch` 和独立单次 `clipboardBindToken`，同样不得持久化或记录。不需要客户端传递设备标识等额外身份资料。
 
 配对后两端每 2 秒发送 `ping`，接到有效 `ping` 返回 `pong`；超过 6 秒没有有效 `ping/pong` 则关闭整个会话。以下每条消息都必须携带完全匹配的 token：
 
@@ -57,7 +57,17 @@ PIN 通过 Mac GUI 隐藏输入框、CLI 终端隐藏输入或显式的受控 st
 {"type":"stop","sessionToken":"<token>"}
 ```
 
-不要求 `stop_ack`。Host 收到 stop 后关闭双连接并清除会话。认证前错误为 `{"type":"error","error":"<reason>"}`；认证后错误还须携带 sessionToken。接收器只保存固定错误分类，不回显服务端提供的任意文本，以免把认证材料带入日志。
+不要求 `stop_ack`。Host 收到 stop 后关闭控制、视频及已建立的剪贴板连接并清除会话。认证前错误为 `{"type":"error","error":"<reason>"}`；认证后错误还须携带 sessionToken。接收器只保存固定错误分类，不回显服务端提供的任意文本，以免把认证材料带入日志。
+
+## 纯文字剪贴板扩展
+
+完整字段、顺序与限制见 [CLIPBOARD_WIRE](CLIPBOARD_WIRE.md)，权限和真实设备验证边界见 [PLATFORM_CAPABILITIES](PLATFORM_CAPABILITIES.md)。剪贴板只提供 **关闭 / Mac → 鸿蒙 / 鸿蒙 → Mac / 双向**四种模式，首次默认关闭，Mac 可记住方向偏好，Host 本地允许开关独立。方向/允许状态改变及重连只建立当前版本基线，不主动发送原有内容；显式 `clipboard_pull` 是例外的用户拉取动作。
+
+配对时第三条连接使用独立、30 秒过期的单次绑定 token，先 `data_bind` → `data_ready`，可以在关闭模式下完成绑定。Host 允许后才按协商方向同步。鸿蒙读取使用 `READ_PASTEBOARD`，需正确签名 ACL 和运行时用户授权；网络不会发起授权弹窗。Mac 剪贴板访问同样受系统权限约束。
+
+每条剪贴板消息是 `uint32BE` JSON 头长度 + 1..4096 字节头 + 已验证的原始 payload，最多 **1 MiB UTF-8 纯文字**；不保排版，拒绝 NUL、错误编码及文件/图片剪贴板。文件传输和文件粘贴不在本版。此通道的组包/发送期限为 **5 秒**，独立于控制/视频的 2 秒期限；在途更新及最新待发更新有界，旧 epoch、版本、迟到 ACK 及模式变化须受顺序检查。剪贴板通道故障只关闭该能力，画面与输入继续。
+
+Mac → 鸿蒙启用时，`⌘V` / `Ctrl+V` 必须先收到对应 `clipboard_applied`，再在原控制通道发送 `paste_commit`；执行前重查焦点、会话、期限和剪贴板版本，失败不回落到 raw V。`paste_result=committed` 只证明注入完成，不证明目标应用粘贴成功。诊断仅包含计数、字节量及错误，不记录 payload、内容摘要、PIN 或绑定凭据。
 
 ## 远程输入（沿用 0.4.x 格式）
 
@@ -185,6 +195,6 @@ Phase 1 已执行上述真实 server fixture 与接收器联动：**28/28 通过
 
 `bash scripts/test-lan-server.sh` 验证 Host 认证、输入范围/白名单、禁用/撤权、不持状态锁回调、提交失败/断线/结束释放及原视频状态机。`bash scripts/test-mac-network.sh` 验证解析、控制、地址、输入字段、顺序发送、仅相邻 Move 合并、Host 撤权通知、129 个边沿触发断开、EOS 之后清理，以及当前会话期限和大小边界。
 
-0.5.0 Mac 网络 **105 项**通过：35 项 parser、22 项 control/address、2 项基础 NWConnection 联动、22 项输入校验/队列边界、2 项输入 fixture、12 项模拟时钟、2 项期限接收 fixture、8 项长流检查。长流分批处理超过 2 GiB、模拟首 AU 后一年时钟推进，仍保留过期首 AU 拒绝、整数溢出保护、本地回放 64 MiB 与单包限制；这些不是一年真机运行。真实 C++ fixture 与 NWConnection 收到的 payload 逐字节一致，见 [本版网络日志](../artifacts/mac-network-tests-permanent-mode.log)。原生会话策略、计时回归及实际 API 26 对象编译见 [原生验证](../artifacts/encoder-native-verification-0.5.0.json)，完整 Host/Mac 构建与部署见 [本版构建记录](../artifacts/build-verification-0.5.0.json)。
+此前 0.5.0 会话模式基线的 Mac 网络 **105 项**通过：35 项 parser、22 项 control/address、2 项基础 NWConnection 联动、22 项输入校验/队列边界、2 项输入 fixture、12 项模拟时钟、2 项期限接收 fixture、8 项长流检查。长流分批处理超过 2 GiB、模拟首 AU 后一年时钟推进，仍保留过期首 AU 拒绝、整数溢出保护、本地回放 64 MiB 与单包限制；这些不是一年真机运行。真实 C++ fixture 与 NWConnection 收到的 payload 逐字节一致，见 [基线网络日志](../artifacts/mac-network-tests-permanent-mode.log)。原生会话策略、计时回归及实际 API 26 对象编译见 [原生验证](../artifacts/encoder-native-verification-0.5.0.json)，当时完整 Host/Mac 构建与部署见 [基线构建记录](../artifacts/build-verification-0.5.0.json)。当前剪贴板扩展另见[本轮验证记录](CLIPBOARD_TEST_RESULTS.md)。
 
 0.4.0 结果原文保留于 `artifacts/lan-server-tests-0.4.0.log`、`artifacts/mac-network-tests-0.4.0.log`。0.4.1 Mac 网络 **97 项**通过，含 **12 个模拟时钟边界**及 **2 个关闭计时器的真实 C++/NWConnection 过期接收 fixture**，确认接收回调不会让过期等待复活；见 [历史网络日志](../artifacts/mac-network-tests-0.4.1.log) 与 [构建验证](../artifacts/build-verification-0.4.1.json)。原生输入 **32 项**开发测试通过。所有开发测试的输入 hooks 均为内存 mock，未调用系统输入、未连接真机，也未打开授权对话框。受限沙箱禁止本机 loopback bind 时，测试在允许本机网络服务的执行环境中运行；这些结果不替代实机效果或长期稳定性。

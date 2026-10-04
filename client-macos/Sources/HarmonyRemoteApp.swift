@@ -62,10 +62,24 @@ struct ViewerWindow: View {
                 Spacer()
             }.padding(.horizontal, 16).padding(.vertical, 9)
             Divider()
+            HStack(spacing: 12) {
+                Picker("文字剪贴板", selection: Binding(get: { model.clipboardMode }, set: { model.setClipboardMode($0) })) {
+                    ForEach(ClipboardMode.allCases) { Text($0.title).tag($0) }
+                }.frame(width: 255).disabled(model.replay)
+                Button("复制远端文字到本机") { model.pullClipboard() }.disabled(!model.clipboardPullEnabled)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.clipboardStatus).font(.caption).lineLimit(2)
+                    Text("只同步文字，不保留排版；文件与图片不支持。启用后不发送旧内容。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }.padding(.horizontal, 16).padding(.vertical, 8)
+            Divider()
             ZStack {
                 Color.black
                 VideoSurface(mailbox: model.mailbox, inputEnabled: model.canControl && model.inputEnabled,
-                    keyboardMode: model.keyboardMode, onInput: model.sendInput, onRelease: model.releaseInputs)
+                    keyboardMode: model.keyboardMode, onInput: model.sendInput, onRelease: model.releaseInputs,
+                    clipboardPasteEnabled: model.clipboardPasteEnabled, onPaste: model.pasteClipboard)
                 if model.decodedFrames == 0 {
                     VStack(spacing: 12) {
                         Image(systemName: "display.2").font(.system(size: 48))

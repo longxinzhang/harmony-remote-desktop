@@ -7,6 +7,8 @@
 #include <functional>
 #include "input_event.h"
 #include <string>
+#include <chrono>
+#include <utility>
 
 #ifdef HRD_LAN_TESTING
 // Available only to the host test executable, never in the application build.
@@ -29,6 +31,16 @@ struct LanInputHooks {
     std::function<void()> release;
 };
 
+struct LanClipboardHooks {
+    std::function<bool(const std::string&)> start;
+    std::function<void()> stop;
+    std::function<bool(std::string&, std::string&)> pair;
+    std::function<void()> disconnect;
+    std::function<std::pair<std::string, std::string>(const std::string&, const std::string&,
+        std::chrono::steady_clock::time_point)> paste;
+    std::function<uint16_t()> port;
+};
+
 class LanServer final {
 public:
     LanServer();
@@ -47,6 +59,7 @@ public:
     bool BeginStream();
     // Install before Start. Callbacks are serialized without holding the server state mutex.
     void SetInputHooks(LanInputHooks hooks);
+    void SetClipboardHooks(LanClipboardHooks hooks);
     // Copies into a bounded queue; performs no socket I/O. CONFIG precedes IDR.
     // At most 3 queued AUs (including empty EOS) and one CONFIG, plus sender's packet.
     bool Publish(const uint8_t* data, size_t size, uint64_t ptsUs,
