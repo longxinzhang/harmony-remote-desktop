@@ -4,6 +4,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ClipboardPermission } from '../services/ClipboardPermission';
+import { StartupService, StartupState } from '../services/StartupService';
 
 interface DeviceSnapshot {
   appVersion: string;
@@ -63,6 +64,12 @@ interface LanSnapshot {
   videoReady: boolean;
   streaming: boolean;
   sentFrames: number;
+  reconnecting: boolean;
+  reconnectGraceMs: number;
+  pairingAvailable: boolean;
+  pairingAllowed: boolean;
+  trustedDeviceCount: number;
+  pairingError: string;
   error: string;
 }
 
@@ -120,6 +127,18 @@ struct Index {
   private clipboardStateSnapshot: string = '';
   private pageScroller: Scroller = new Scroller();
   @StorageLink('hrdSessionMode') sessionMode: string = 'permanent';
+  @StorageLink('hrdStartServerOnLaunch') startServerOnLaunch: boolean = false;
+  @StorageLink('hrdFrameRate') frameRate: number = 30;
+  @StorageLink('hrdCaptureAudio') captureAudio: boolean = false;
+  @State startupState: StartupState = new StartupState();
+  @State pairingAvailable: boolean = false;
+  @State pairingAllowed: boolean = false;
+  @State trustedDeviceCount: number = 0;
+  @State pairingError: string = '';
+  @State reconnecting: boolean = false;
+  @State reconnectSeconds: number = 0;
+  @State audioText: string = '{}';
+  private startedServiceForLaunch: boolean = false;
   @State status: string = '';
   @State action: string = '';
   @State countdown: number = 0;
@@ -134,7 +153,13 @@ struct Index {
     if (this.sessionMode !== 'debug' && this.sessionMode !== 'permanent') {
       this.sessionMode = 'permanent';
     }
+    if (this.frameRate !== 30 && this.frameRate !== 60) { this.frameRate = 30; }
     this.refresh();
+    this.refreshStartup();
+    if (this.startServerOnLaunch && !this.startedServiceForLaunch && !this.lanRunning) {
+      this.startedServiceForLaunch = true;
+      this.startLanServer();
+    }
     this.persistDiagnostics();
     this.refreshTimer = setInterval(() => this.refresh(), 1000);
   }
@@ -154,6 +179,7 @@ struct Index {
     this.captureText = probe.captureSnapshot();
     this.inputText = probe.inputSnapshot();
     this.encoderText = probe.encoderSnapshot();
+    this.audioText = probe.audioSnapshot();
     try {
       const snapshot = JSON.parse(this.captureText) as CaptureSnapshot;
       this.frames = snapshot.frames;
@@ -168,6 +194,12 @@ struct Index {
       this.encoderElapsed = encoder.elapsedSeconds;
       this.encoderBytes = encoder.bytes;
       const lan = JSON.parse(probe.lanSnapshot()) as LanSnapshot;
+      this.pairingAvailable = lan.pairingAvailable;
+      this.pairingAllowed = lan.pairingAllowed;
+      this.trustedDeviceCount = lan.trustedDeviceCount;
+      this.pairingError = lan.pairingError;
+      this.reconnecting = lan.reconnecting;
+      this.reconnectSeconds = Math.ceil(lan.reconnectGraceMs / 1000);
       this.lanRunning = lan.running;
       this.lanStatus = lan.status;
       this.lanBoundAddress = lan.bindAddress;
@@ -213,6 +245,17 @@ struct Index {
       this.status = '暂时无法更新状态，请稍后重试。';
       this.operationDetail = '状态 JSON 解析失败';
     }
+  }
+
+  private async refreshStartup(): Promise<void> {
+    this.startupState = await new StartupService().readStatus();
+  }
+
+  private revokePairing(): void {
+    const code = probe.revokePairing();
+    this.setOperationResult(code, '所有可信设备已撤销，当前会话已结束。', '撤销未完成，请查看开发测试中的诊断。');
+    this.refresh();
+    this.persistDiagnostics();
   }
 
   private startCapture(): void {
@@ -274,7 +317,7 @@ struct Index {
 
   private startLanCapture(): void {
     this.cancelAction();
-    const code = probe.startLanCapture(this.filesDir, this.sessionMode === 'debug' ? 600 : 0);
+    const code = probe.startLanCapture(this.filesDir, this.sessionMode === 'debug' ? 600 : 0, this.frameRate, this.captureAudio);
     this.setOperationResult(code, this.sessionMode === 'debug' ?
       '请允许共享整个主屏幕；开始共享后 10 分钟自动结束，可随时停止。' :
       '请允许共享整个主屏幕；永久上线模式不设自动结束时间，可随时停止。',
@@ -310,8 +353,8 @@ struct Index {
 
   private persistDiagnostics(): void {
     const device: DeviceSnapshot = {
-      appVersion: '0.5.0',
-      appBuild: 1000010,
+      appVersion: '0.6.0',
+      appBuild: 1000011,
       sessionMode: this.sessionMode,
       deviceType: deviceInfo.deviceType,
       osFullName: deviceInfo.osFullName,
@@ -370,6 +413,7 @@ struct Index {
       this.cancelAction();
     }
     this.currentPage = page;
+    if (page === 'settings') { this.refreshStartup(); }
     this.pageScroller.scrollEdge(Edge.Top);
     this.updateMotion();
   }
@@ -427,6 +471,7 @@ struct Index {
   }
 
   private sharingLabel(): string {
+    if (this.reconnecting) { return `连接中断，等待恢复（${this.reconnectSeconds} 秒）`; }
     if (this.captureRunning) { return '本机录屏测试中，可在开发测试停止'; }
     if (this.encoderRunning && !this.lanRunning) { return '本机编码测试中，可在开发测试停止'; }
     if (this.lanStreaming && this.encoderFrames > 0) { return '正在共享屏幕'; }
@@ -546,7 +591,7 @@ struct Index {
     Column({ space: 12 }) {
       this.cardHeading('屏幕共享', this.sharingLabel())
       Row({ space: 6 }) {
-        Text(this.modeLabel()).fontSize(11).fontColor('#687E9D').padding({ left: 7, right: 7, top: 4, bottom: 4 })
+        Text(`${this.modeLabel()} · ${this.frameRate} FPS${this.captureAudio ? ' · 系统声音' : ''}`).fontSize(11).fontColor('#687E9D').padding({ left: 7, right: 7, top: 4, bottom: 4 })
           .backgroundColor('#F1F5FA').borderRadius(5)
         Text('可在设置中更改').fontSize(11).fontColor('#94A0B0')
       }
@@ -559,7 +604,7 @@ struct Index {
         .onClick(() => {
           if (this.encoderRunning && this.lanStreaming) {
             this.stopEncoder();
-            this.status = '屏幕共享已停止。连接保留，可手动再次共享。';
+            this.status = '屏幕共享已停止。已保存的配对保留，可重新连接并共享。';
           } else { this.startLanCapture(); }
         })
       Text('共享需要本机确认；传输画面不会保存为录像。').fontSize(12).fontColor('#7B8AA0').lineHeight(18)
@@ -669,12 +714,58 @@ struct Index {
             this.persistDiagnostics();
           })
         Text(this.sessionMode === 'debug' ? '从第一帧开始计时，10 分钟后自动停止共享。' :
-          '不设共享时长上限；主动停止、连接中断或关闭应用时结束。')
+          '不设共享时长上限；主动停止或关闭应用时结束。断线为同一设备保留最多 60 秒，超时停止。')
           .fontSize(13).fontColor('#61738C').lineHeight(20)
         if (this.encoderRunning || this.captureRunning) {
           Text('停止当前共享或测试后，可更改会话模式。').fontSize(12).fontColor('#9A783D')
         }
-        Text('下次打开会记住模式选择，但不会自动上线或开始共享。').fontSize(12).fontColor('#8796AA')
+        Text('下次打开会记住模式选择；自动开启服务需单独设置，共享仍需授权。').fontSize(12).fontColor('#8796AA')
+      }.alignItems(HorizontalAlign.Start).width('100%').padding(22).backgroundColor('#FFFFFF').borderRadius(12)
+      Column({ space: 16 }) {
+        this.cardHeading('画面与声音', '停止当前共享后调整，于下一次共享生效。')
+        Row({ space: 20 }) {
+          Text('目标帧率').fontSize(14).fontColor('#405978')
+          Select([{ value: '30 FPS' }, { value: '60 FPS' }])
+            .selected(this.frameRate === 60 ? 1 : 0).value(`${this.frameRate} FPS`)
+            .enabled(!this.encoderRunning && !this.captureRunning)
+            .onSelect((index: number) => { this.frameRate = index === 1 ? 60 : 30; })
+        }
+        Row({ space: 16 }) {
+          Toggle({ type: ToggleType.Switch, isOn: this.captureAudio })
+            .enabled(!this.encoderRunning && !this.captureRunning)
+            .onChange((value: boolean) => { this.captureAudio = value; })
+          Text('共享系统声音').fontSize(14).fontColor('#405978')
+        }
+        Text('60 帧须硬件编码器支持；实际帧率受画面、设备和网络影响。不采集麦克风，不保存音频。')
+          .fontSize(12).fontColor('#61738C').lineHeight(20)
+      }.alignItems(HorizontalAlign.Start).width('100%').padding(22).backgroundColor('#FFFFFF').borderRadius(12)
+      Column({ space: 16 }) {
+        this.cardHeading('持久配对', `已记住 ${this.trustedDeviceCount} 台设备`)
+        Row({ space: 16 }) {
+          Toggle({ type: ToggleType.Switch, isOn: this.pairingAllowed })
+            .enabled(this.pairingAvailable).onChange((value: boolean) => { probe.allowPairing(value); this.refresh(); })
+          Text('允许新增可信设备').fontSize(14).fontColor('#405978')
+        }
+        Text(this.pairingAvailable ? 'Mac 首次勾选“记住这台设备”后，后续校验设备身份即可连接。关闭此开关不移除已有配对。' :
+          '设备安全密钥暂不可用，仍可使用一次性连接码。详细原因见开发测试。')
+          .fontSize(12).fontColor('#61738C').lineHeight(20)
+        Button('撤销所有可信设备并断开').type(ButtonType.Normal).height(38).borderRadius(8)
+          .fontColor('#B85535').backgroundColor('#FFF0EB').onClick(() => this.revokePairing())
+        Text('配对不自动允许屏幕共享、键鼠控制或剪贴板。断线仅为同一设备保留已授权采集最多 60 秒，超时停止。')
+          .fontSize(12).fontColor('#8796AA').lineHeight(20)
+      }.alignItems(HorizontalAlign.Start).width('100%').padding(22).backgroundColor('#FFFFFF').borderRadius(12)
+      Column({ space: 16 }) {
+        this.cardHeading('启动', this.startupState.summary)
+        Text(this.startupState.detail).fontSize(12).fontColor('#61738C').lineHeight(20)
+        Button('刷新系统自启动状态').type(ButtonType.Normal).height(36).fontSize(13)
+          .onClick(() => { this.refreshStartup(); })
+        Row({ space: 16 }) {
+          Toggle({ type: ToggleType.Switch, isOn: this.startServerOnLaunch })
+            .onChange((value: boolean) => { this.startServerOnLaunch = value; })
+          Text('打开应用后自动开启服务').fontSize(14).fontColor('#405978')
+        }
+        Text('只开启局域网监听；不会自动录屏或授权远程控制。系统开机自启动是否生效以上方查询结果为准。')
+          .fontSize(12).fontColor('#8796AA').lineHeight(20)
       }.alignItems(HorizontalAlign.Start).width('100%').padding(22).backgroundColor('#FFFFFF').borderRadius(12)
       Column({ space: 16 }) {
         this.cardHeading('本机连接地址', '留空时自动选择局域网 IPv4 地址。地址只用于此电脑的服务。')
@@ -714,6 +805,8 @@ struct Index {
   developerPage() {
     Column({ space: 18 }) {
       this.pageHeading('开发测试', '能力验证与诊断工具。切换页面不会中断远程会话。')
+      Text(`配对密钥：${this.pairingAvailable ? '可用' : '不可用'} ${this.pairingError}`).fontSize(12).fontColor('#61738C')
+      Text(`音频：${this.audioText}`).fontSize(11).fontColor('#61738C').copyOption(CopyOptions.InApp)
       if (this.lanRunning) {
         Text('局域网服务正在运行，本机录屏与注入测试已停用。可继续查看诊断；下线后即可测试。')
           .fontSize(13).fontColor('#8C6A32').lineHeight(20).padding(16).width('100%')

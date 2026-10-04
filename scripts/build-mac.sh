@@ -12,7 +12,7 @@ cp "$project_dir/client-macos/Resources/Info.plist" "$app_dir/Contents/Info.plis
 /usr/bin/swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$module_cache" \
   -framework SwiftUI -framework AppKit -framework Network -framework VideoToolbox \
-  -framework CoreMedia -framework CoreVideo -framework AVFoundation \
+  -framework CoreMedia -framework CoreVideo -framework AVFoundation -framework ServiceManagement -framework Security -framework CryptoKit \
   "$source_snapshot"/*.swift -o "$app_dir/Contents/MacOS/HarmonyRemote"
 /usr/bin/codesign --force --sign - --timestamp=none "$app_dir"
 /usr/bin/codesign --verify --strict "$app_dir"

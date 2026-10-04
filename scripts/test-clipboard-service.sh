@@ -17,5 +17,6 @@ fi
   -I "$project_dir/host-harmony/entry/src/main/cpp" \
   "$project_dir/host-harmony/entry/src/main/cpp/clipboard_service.cpp" \
   "$project_dir/host-harmony/entry/src/main/cpp/lan_server.cpp" \
-  "$project_dir/tests/clipboard_service_test.cpp" -o "$test_binary"
+  "$project_dir/host-harmony/entry/src/main/cpp/pairing_identity.cpp" \
+  "$project_dir/tests/clipboard_service_test.cpp" -framework Security -framework CoreFoundation -o "$test_binary"
 if [[ "$run_tests" == true ]]; then "$test_binary"; fi

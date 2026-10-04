@@ -1,19 +1,19 @@
-# LAN video, input and clipboard protocol — version 1
+# LAN video, input, clipboard and audio protocol — version 1
 
-本文定义 **0.5.0 剪贴板构建（Host `1000008` / Mac `5`）**使用的线上格式：Harmony 硬件编码通过视频 TCP 连接传输到 Mac Viewer；独立控制 TCP 连接承担配对、心跳及可撤销的远程输入，协商后第三条连接承担纯文字剪贴板。协议版本仍为 **1**，HRD1 视频格式与 0.3.x 兼容，输入格式沿用 0.4.0、由 hello capability 协商。当前剪贴板构建、安装与验收状态见[剪贴板验证记录](CLIPBOARD_TEST_RESULTS.md)；此前 [0.5.0 会话模式基线部署记录](../artifacts/build-verification-0.5.0.json) 不代表本轮剪贴板已验收。十分钟完整共享、永久模式长期运行尚未真机验收。
+本文定义沿用到 **0.6.0-rc.1（Host `1000011` / Mac `8`）** 的基础格式：Harmony 硬件编码通过视频 TCP 连接传输到 Mac Viewer；独立控制 TCP 连接承担配对、心跳及可撤销的远程输入，协商后第三条连接承担纯文字剪贴板，第四条承担系统声音。0.6 新增的身份握手、采集恢复与 RTT 以[会话可靠性扩展](SESSION_RELIABILITY.md)为准；音频格式见[音频与帧率](MEDIA_AUDIO_FPS.md)。下文简化的 PIN 握手继续作为旧客户端兼容路径，新 Mac 使用已协商的签名握手。协议版本仍为 **1**，HRD1 视频格式与 0.3.x 兼容，输入格式沿用 0.4.0、由 hello capability 协商。当前剪贴板构建、安装与验收状态见[剪贴板验证记录](CLIPBOARD_TEST_RESULTS.md)；此前 [0.5.0 会话模式基线部署记录](../artifacts/build-verification-0.5.0.json) 不代表本轮剪贴板已验收。十分钟完整共享、永久模式长期运行尚未真机验收。
 
 0.4.0 已实机确认文字输入、右键菜单和 `⌘L`，0.4.1 已确认窗口拖动、文字拖选与松手停止；这些历史结果不等于完整输入或长期稳定性验收，见 [拖拽证据](../artifacts/device/drag-0-4-1-verified/drag-review.json)。本机协议测试与真机结果分别记录。
 
 ## 范围与启动
 
-- 仅用于可信局域网原型。控制、视频与剪贴板均为**明文 TCP**，PIN/session 校验不提供加密或抵御局域网窃听。正式版本的 TLS 1.3、设备证书、持久身份尚未实现。
+- 仅用于可信局域网原型。控制、视频、音频与剪贴板均为**明文 TCP**，PIN/session 校验不提供加密或抵御局域网窃听。0.6 已加入持久签名身份；TLS 1.3 与传输加密尚未实现。
 - 不使用端口转发、公网暴露、UPnP、NAT-PMP。Mac 客户端只接受 RFC1918 IPv4：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`，不解析主机名。
-- Host 未点击 **Start Server** 时不监听。控制端口 `39871/TCP`，视频端口 `39872/TCP`，新增独立剪贴板端口 `39873/TCP`；只允许一个配对客户端，已有会话时拒绝新客户端。剪贴板监听失败不停止原有视频/输入服务，Host 只在就绪时宣告该 capability。
+- Host 默认需点击**开启服务**才监听；用户可另外选择打开应用后自动开启服务。控制端口 `39871/TCP`，视频端口 `39872/TCP`，剪贴板端口 `39873/TCP`，音频端口 `39874/TCP`；只允许一个配对客户端，已有会话时拒绝新客户端。剪贴板或音频监听失败不停止原有视频/输入服务，Host 只在相应服务就绪时宣告该 capability。
 - Host 的 API 26 模块已声明 `ohos.permission.INTERNET`。这与用户另行确认系统录屏授权是不同的能力边界。
-- 每次 Start 生成新的 6 位随机数字 PIN，5 分钟过期、成功后单次消费；最多 5 次错误尝试。PIN 不得硬编码。
-- 成功配对生成密码学随机的 256-bit token，以 64 位十六进制字符串传输，仅当前会话有效；断线/Stop 后失效。不实现永久设备信任。
-- 配对及 `video_ready` 只建立会话。用户还需在 Host 选择共享模式、点击 **Start LAN Capture**并完成系统录屏授权，才开始这次视频传输；不得绕过授权。
-- Host 的 LAN 模式仅有 **10 分钟调试（600 秒）**和 **永久上线（0，无自动结束时间）**，默认永久。`PersistentStorage` 的 `hrdSessionMode` 只保存模式选择，不保存配对、系统授权或允许远程控制开关。调试显示动态图案和开发面板，永久隐藏；两者都不保存本地 H.264。永久不代表自动配对、自动共享或断线自动重连。
+- 每次 Start 和已配对会话断开后生成新的 6 位随机数字 PIN，5 分钟过期、成功后单次消费；最多 5 次错误尝试。PIN 不得硬编码。
+- 成功配对生成密码学随机的 256-bit token，以 64 位十六进制字符串传输，仅当前会话有效；断线/Stop 后失效。0.6 可保存独立设备签名身份；每次恢复仍生成新的会话 token，不保存或复用旧 token。
+- 配对及 `video_ready` 只建立会话。用户还需在 Host 选择共享模式、点击 **开始共享屏幕**并完成系统录屏授权，才开始这次视频传输；不得绕过授权。
+- Host 的 LAN 模式仅有 **10 分钟调试（600 秒）**和 **永久上线（0，无自动结束时间）**，默认永久。`PersistentStorage` 的 `hrdSessionMode` 只保存模式选择，不保存配对、系统授权或允许远程控制开关。调试模式仅在开发测试页显示动态图案；两种模式均可打开开发测试页，均不保存本地 H.264。重连是单独的可关闭功能；同一认证身份可在 60 秒保留期内继承尚未结束的采集，不能越过系统授权、到期或本地停止。
 - `LISTENING` 在 Host 页面显示为“在线，等待连接”；线上字段和诊断状态枚举不变，模式也不改变以下握手格式。
 
 ## 控制通道
@@ -30,7 +30,7 @@ payloadLength bytes, UTF-8 JSON object
 握手顺序：
 
 ```json
-{"type":"hello","protocol":1,"client":"macOS","clientVersion":"0.5.0"}
+{"type":"hello","protocol":1,"client":"macOS","clientVersion":"0.6.0"}
 ```
 
 ```json
@@ -47,9 +47,9 @@ payloadLength bytes, UTF-8 JSON object
 {"type":"pair_ok","sessionToken":"<64 hex characters>"}
 ```
 
-PIN 通过 Mac GUI 隐藏输入框、CLI 终端隐藏输入或显式的受控 stdin 获取，不作为 argv/env，不写日志或报告；GUI 提交后清空输入框。PIN 与 token 只保存在当前会话内存中；剪贴板就绪时，`pair_ok` 另附 `clipboardEpoch` 和独立单次 `clipboardBindToken`，同样不得持久化或记录。不需要客户端传递设备标识等额外身份资料。
+PIN 通过 Mac GUI 隐藏输入框、CLI 终端隐藏输入或显式的受控 stdin 获取，不作为 argv/env，不写日志或报告；GUI 提交后清空输入框。PIN 与 token 只保存在当前会话内存中；剪贴板就绪时，`pair_ok` 另附 `clipboardEpoch` 和独立单次 `clipboardBindToken`，同样不得持久化或记录。现代签名握手还携带公钥、独立挑战和签名，不传设备序列号等额外硬件标识。
 
-配对后两端每 2 秒发送 `ping`，接到有效 `ping` 返回 `pong`；超过 6 秒没有有效 `ping/pong` 则关闭整个会话。以下每条消息都必须携带完全匹配的 token：
+配对后两端每 2 秒发送 `ping`，接到有效 `ping` 返回 `pong`；超过 6 秒没有有效 `ping/pong` 则关闭当前传输会话；符合条件的采集进入恢复保留期。`rttSupported:true` 时 Mac ping 附加 16 位十六进制 `probeId`，Host pong 原样回显用于匹配单调时钟 RTT。以下每条消息都必须携带完全匹配的 token：
 
 ```json
 {"type":"ping","sessionToken":"<token>"}
@@ -57,7 +57,7 @@ PIN 通过 Mac GUI 隐藏输入框、CLI 终端隐藏输入或显式的受控 st
 {"type":"stop","sessionToken":"<token>"}
 ```
 
-不要求 `stop_ack`。Host 收到 stop 后关闭控制、视频及已建立的剪贴板连接并清除会话。认证前错误为 `{"type":"error","error":"<reason>"}`；认证后错误还须携带 sessionToken。接收器只保存固定错误分类，不回显服务端提供的任意文本，以免把认证材料带入日志。
+不要求 `stop_ack`。Host 收到 stop 后关闭控制、视频、音频及已建立的剪贴板连接并清除会话，终止采集保留期。认证前错误为 `{"type":"error","error":"<reason>"}`；认证后错误还须携带 sessionToken。接收器只保存固定错误分类，不回显服务端提供的任意文本，以免把认证材料带入日志。
 
 ## 纯文字剪贴板扩展
 
@@ -100,7 +100,7 @@ Mac → 鸿蒙启用时，`⌘V` / `Ctrl+V` 必须先收到对应 `clipboard_app
 | 编辑/导航 | `ENTER ESCAPE TAB SPACE BACKSPACE DELETE UP DOWN LEFT RIGHT HOME END PAGE_UP PAGE_DOWN` |
 | 修饰 | `SHIFT_LEFT SHIFT_RIGHT CTRL_LEFT CTRL_RIGHT ALT_LEFT ALT_RIGHT META_LEFT META_RIGHT CAPS_LOCK` |
 
-Mac 输入邮箱与待发送消息有界，最多 128 条未完成输入；只合并相邻尚未发送的 Move，不跨越按钮/按键边沿、滚轮、启用或释放消息。控制发送一次只保留一个在途 NWConnection send，并限制其队列为 128；超限断开并释放，不静默丢按键。每批输入绑定接收时的连接 generation，重连会清空旧批次。结束时同一 TCP 顺序发送 `release_all_keys` 后 `stop`；发送失败时 Host 断线清理仍负责释放。
+Mac 输入邮箱与待发送消息有界，最多 128 条未完成输入；只合并相邻尚未发送的 Move，不跨越按钮/按键边沿、滚轮、启用或释放消息。控制发送一次只保留一个在途 NWConnection send，并限制其队列为 128；超限断开并释放，不静默丢按键。每批输入绑定接收时的连接 generation，重连会清空旧批次。显式断开或正常结束时，同一 TCP 顺序发送 `release_all_keys` 后 `stop`；传输故障直接关闭连接，使 Host 清理输入并按恢复规则保留采集，不能错误地发送 stop 提前终止它。发送失败时 Host 断线清理仍负责释放。
 
 输入 hooks 由独立串行门调用，不持 Host server 状态锁，允许 native 查询/释放等待。Server 诊断只包含 `inputSupported/inputEnabled/inputAccepted/inputRejected/inputReleases`；Mac 只增加 `inputSupported/inputEnabled/inputSent`（成功交给 NWConnection 的输入控制消息数，包含启用/释放），不记录键名、文本、PIN 或 token。
 

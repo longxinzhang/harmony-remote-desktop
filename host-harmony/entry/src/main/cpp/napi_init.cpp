@@ -9,6 +9,7 @@
 #include "lan_server.h"
 #include "remote_input.h"
 #include "clipboard_service.h"
+#include "audio_service.h"
 
 namespace {
 napi_value Number(napi_env env, int code)
@@ -107,14 +108,17 @@ napi_value LanSnapshot(napi_env env, napi_callback_info)
 
 napi_value StartLanCapture(napi_env env, napi_callback_info info)
 {
-    size_t argc = 2;
-    napi_value args[2];
+    size_t argc = 4;
+    napi_value args[4];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     std::string filesDir;
-    double duration = 0;
-    if (argc != 2 || !ReadText(env, args[0], filesDir) ||
+    double duration = 0, frameRate = 30;
+    bool audio = false;
+    if (argc != 4 || !ReadText(env, args[0], filesDir) ||
         napi_get_value_double(env, args[1], &duration) != napi_ok ||
-        !encoder_session::IsLanDuration(duration)) { return Number(env, -1); }
+        napi_get_value_double(env, args[2], &frameRate) != napi_ok ||
+        napi_get_value_bool(env, args[3], &audio) != napi_ok ||
+        (frameRate != 30 && frameRate != 60) || !encoder_session::IsLanDuration(duration)) { return Number(env, -1); }
     if (GetEncoderProbe().IsRunning()) { return Number(env, -2); }
     if (!GetLanServer().BeginStream()) { return Number(env, -4); }
     GetCaptureProbe().Stop();
@@ -124,13 +128,43 @@ napi_value StartLanCapture(napi_env env, napi_callback_info info)
         return GetLanServer().Publish(data, size, ptsUs, config, keyframe, eos);
     };
     hooks.cancelled = [] { return GetLanServer().IsStreamCancelled(); };
-    hooks.finished = [](bool success) { GetLanServer().EndStream(success); };
+    hooks.requestKeyframe = [] { return GetLanServer().ConsumeKeyframeRequest(); };
+    hooks.audioPCM = [](const uint8_t* bytes, size_t length, uint64_t ptsUs) {
+        return !GetLanServer().IsStreamCancelled() && GetAudioService().PublishPCM(bytes, length, ptsUs);
+    };
+    hooks.finished = [](bool success) { GetAudioService().EndStream(); GetLanServer().EndStream(success); };
     EncoderSessionOptions options;
     options.durationSeconds = static_cast<int>(duration);
     options.recordLocally = false;
+    options.frameRate = static_cast<int>(frameRate); options.captureSystemAudio = audio;
+    if (audio) GetAudioService().BeginStream();
     const int code = GetEncoderProbe().Start(filesDir, std::move(hooks), options);
+    if (code != 0) { GetAudioService().EndStream(); GetLanServer().EndStream(false); }
     return Number(env, code);
 }
+
+napi_value ConfigurePairing(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1; napi_value args[1]; std::string filesDir;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1 || !ReadText(env, args[0], filesDir)) return Number(env, -1);
+    return Number(env, GetLanServer().ConfigurePairingStorage(filesDir) ? 0 : -2);
+}
+napi_value AllowPairing(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1; napi_value args[1]; bool allowed = false;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1 || napi_get_value_bool(env, args[0], &allowed) != napi_ok) return Number(env, -1);
+    GetLanServer().SetPairingAllowed(allowed); return Number(env, 0);
+}
+napi_value RevokePairing(napi_env env, napi_callback_info)
+{
+    const bool revoked = GetLanServer().RevokePairedDevices();
+    GetAudioService().EndSession();
+    GetClipboardService().EndSession();
+    return Number(env, revoked ? 0 : -1);
+}
+napi_value AudioSnapshot(napi_env env, napi_callback_info) { return Text(env, GetAudioService().SnapshotJson()); }
 
 napi_value StopCapture(napi_env env, napi_callback_info)
 {
@@ -246,6 +280,7 @@ napi_value SaveDiagnostics(napi_env env, napi_callback_info info)
     success = WriteFile(filesDir + "/lan-snapshot.json", GetLanServer().SnapshotJson()) && success;
     success = WriteFile(filesDir + "/remote-input.json", GetRemoteInput().SnapshotJson()) && success;
     success = WriteFile(filesDir + "/clipboard-snapshot.json", GetClipboardService().SnapshotJson()) && success;
+    success = WriteFile(filesDir + "/audio-snapshot.json", GetAudioService().SnapshotJson()) && success;
     success = WriteFile(filesDir + "/device-info.json", deviceJson) && success;
     return Number(env, success ? 0 : -2);
 }
@@ -283,8 +318,24 @@ napi_value Init(napi_env env, napi_value exports)
             [](std::function<bool()> valid, ClipboardService::Deadline until) { return GetRemoteInput().Paste(std::move(valid), until); });
     };
     GetLanServer().SetClipboardHooks(std::move(clipboardHooks));
+    GetAudioService();
+    LanAudioHooks audioHooks;
+    audioHooks.start = [](const std::string& address) { return GetAudioService().Start(address); };
+    audioHooks.stop = [] { GetAudioService().Stop(); };
+    audioHooks.pair = [](std::string& epoch, std::string& token) {
+        const bool ready = GetAudioService().BeginSession(epoch, token);
+        if (ready && GetLanServer().CanResumeCapture() && GetEncoderProbe().IsSystemAudioRunning()) GetAudioService().BeginStream();
+        return ready;
+    };
+    audioHooks.disconnect = [] { GetAudioService().EndSession(); };
+    audioHooks.port = [] { return GetAudioService().Port(); };
+    GetLanServer().SetAudioHooks(std::move(audioHooks));
     GetEncoderProbe();
     napi_property_descriptor methods[] = {
+        {"configurePairing", nullptr, ConfigurePairing, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"allowPairing", nullptr, AllowPairing, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"revokePairing", nullptr, RevokePairing, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"audioSnapshot", nullptr, AudioSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startCapture", nullptr, StartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopCapture", nullptr, StopCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"captureSnapshot", nullptr, CaptureSnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},

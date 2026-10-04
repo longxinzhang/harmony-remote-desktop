@@ -60,6 +60,27 @@ final class ViewerModel: ObservableObject {
     @Published var host = UserDefaults.standard.string(forKey: "lastHost") ?? ""
     @Published var pin = ""
     @Published var active = false
+    @Published var reconnecting = false
+    @Published var reconnectAttempt = 0
+    @Published var automaticReconnect = UserDefaults.standard.object(forKey: "automaticReconnect") as? Bool ?? true
+    @Published var rememberDevice = false
+    @Published var trustedPeers: [TrustedPeer] = []
+    @Published var pairingStatus = "首次配对请核对鸿蒙端连接码。"
+    @Published var networkType = "未连接"
+    @Published var networkRTT: Double?
+    @Published var networkJitter: Double?
+    @Published var videoMbps = 0.0
+    @Published var receivedFPS = 0.0
+    @Published var audioMuted = false
+    @Published var audioStatus = "声音未连接"
+    private let pairingStore = PairingStore()
+    private var resumeIdentity: PairingCredentials?
+    private var retryPolicy = ReconnectPolicy()
+    private var reconnectWork: DispatchWorkItem?
+    private var audioConnection: AudioConnection?
+    private var audioPlayback: AudioPlayback?
+    private var audioTransportStatus = "声音未连接"
+
     @Published var state = "等待连接"
     @Published var detail = "在鸿蒙端启动服务，输入 IP 和一次性 PIN。"
     @Published var receivedFrames = 0
@@ -110,7 +131,7 @@ final class ViewerModel: ObservableObject {
         }
     }
 
-    deinit { timer?.invalidate(); clipboardTimer?.invalidate() }
+    deinit { timer?.invalidate(); clipboardTimer?.invalidate(); reconnectWork?.cancel() }
 
     func startArguments() {
         guard !startedArguments else { return }; startedArguments = true
@@ -125,7 +146,7 @@ final class ViewerModel: ObservableObject {
     }
 
     private func prepare(isReplay: Bool) -> (UUID, DecodePipeline) {
-        stopClipboard()
+        stopClipboard(); stopAudio()
         replayCancellation?.cancel(); connection?.disconnect(); pipeline?.cancel()
         generation = UUID(); mailbox = FrameMailbox()
         let decoder = DecodePipeline(mailbox: mailbox); pipeline = decoder
@@ -137,16 +158,44 @@ final class ViewerModel: ObservableObject {
         return (generation, decoder)
     }
 
+    func reloadTrustedPeers() {
+        do { trustedPeers = try pairingStore.peers() }
+        catch { pairingStatus = error.localizedDescription }
+    }
+    func forgetPeer(_ peer: TrustedPeer) {
+        if sessionHost == peer.host && (active || reconnecting) { disconnect() }
+        do {
+            try pairingStore.forget(host: peer.host)
+            if sessionHost == peer.host { resumeIdentity = nil }
+            reloadTrustedPeers(); pairingStatus = "已移除此 Mac 保存的配对；鸿蒙端也可撤销所有可信设备。"
+        } catch { pairingStatus = error.localizedDescription }
+    }
+    func connectTrusted(_ peer: TrustedPeer) { guard !active && !reconnecting else { return }; host = peer.host; pin = ""; connect() }
+    func setAutomaticReconnect(_ enabled: Bool) {
+        automaticReconnect = enabled; UserDefaults.standard.set(enabled, forKey: "automaticReconnect")
+        if !enabled && reconnecting { disconnect() }
+    }
     func connect() {
-        guard !active else { return }
+        guard !active && !reconnecting else { return }
         let address = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard WireProtocol.validHost(address), pin.count == 6, pin.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else {
-            failed = true; state = "请检查连接信息"; detail = "需要局域网 IPv4 地址和 6 位数字 PIN。"; return
+        guard WireProtocol.validHost(address) else {
+            failed = true; state = "请检查连接信息"; detail = "需要局域网 IPv4 地址。"; return
         }
-        let secret = pin; pin = ""
+        do {
+            let credential: PairingCredentials
+            if WireProtocol.validPIN(pin) { credential = PairingCredentials(remember: rememberDevice) }
+            else if pin.isEmpty, let saved = try pairingStore.load(host: address) { credential = saved }
+            else { throw LANError.invalidPIN }
+            let secret = pin; pin = ""; resumeIdentity = nil
+            retryPolicy.reset(); reconnectAttempt = 0; reconnectWork?.cancel(); reconnectWork = nil
+            beginConnection(address: address, pin: secret, credential: credential)
+        } catch { failed = true; state = "请检查连接信息"; detail = error.localizedDescription }
+    }
+    private func beginConnection(address: String, pin secret: String, credential: PairingCredentials) {
         let (id, decoder) = prepare(isReplay: false)
         sessionHost = address
-        state = "正在配对"; detail = "连接成功后，请在鸿蒙端点击 Start LAN Capture 并允许共享屏幕。"
+        state = credential.resuming ? "正在验证已配对设备" : "正在配对"
+        detail = "连接后，请在鸿蒙端开始共享；恢复连接不会回放旧输入或粘贴。"
         let network = LANConnection(onStatus: { [weak self] status in
             DispatchQueue.main.async {
                 guard let self, self.generation == id, self.active else { return }
@@ -176,26 +225,56 @@ final class ViewerModel: ObservableObject {
                 guard let self, self.generation == id else { return }
                 self.clipboard.pasteResult(result)
             }
+        }, onPairedIdentity: { [weak self] verified in
+            DispatchQueue.main.async {
+                guard let self, self.generation == id else { return }
+                self.resumeIdentity = verified
+                self.pairingStatus = "设备身份已校验 · \(verified.fingerprint)"
+                if verified.remember && !credential.resuming {
+                    do { try self.pairingStore.save(host: address, credentials: verified); self.reloadTrustedPeers() }
+                    catch { self.pairingStatus = error.localizedDescription }
+                }
+            }
+        }, onAudioSession: { [weak self] session in
+            DispatchQueue.main.async {
+                guard let self, self.generation == id else { return }
+                if let session { self.startAudio(session, generation: id) } else { self.stopAudio() }
+            }
         })
         connection = network
         UserDefaults.standard.set(address, forKey: "lastHost")
-        network.connect(host: address, pin: secret)
+        network.connect(host: address, pin: secret, pairing: credential)
     }
 
     private func complete(_ id: UUID, _ decoder: DecodePipeline, _ result: Result<Void, Error>) {
         decoder.finish(result) { [weak self] outcome, snapshot in
             DispatchQueue.main.async {
                 guard let self, self.generation == id else { return }
-                self.updateDecoder(snapshot); self.active = false
+                self.updateDecoder(snapshot); self.active = false; self.inputEnabled = false
+                self.stopClipboard(); self.stopAudio()
                 self.timer?.invalidate(); self.timer = nil
+                self.reconnecting = false
                 switch outcome {
                 case .success:
                     self.lastResult = self.replay ? "LOCAL_REPLAY_DECODED" : "LIVE_STREAM_DECODED"
                     self.state = self.replay ? "验证回放结束" : "共享已结束"
-                    self.detail = self.replay ? "这是本地录屏验证画面，不是实时连接。" : "当前保留最后一帧。重新连接前，请在鸿蒙端重启服务生成新 PIN。"
+                    self.detail = self.replay ? "这是本地录屏验证画面，不是实时连接。" : "当前保留最后一帧。可使用已保存的配对重新连接，或获取新的连接码。"
                 case .failure(let error):
                     self.lastResult = "FAILED"; self.failed = true; self.state = "连接已结束"
                     self.detail = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                    if !self.replay, let delay = self.retryPolicy.nextDelay(for: error, enabled: self.automaticReconnect, hasIdentity: self.resumeIdentity != nil),
+                       let identity = self.resumeIdentity {
+                        self.reconnecting = true; self.failed = false; self.reconnectAttempt = self.retryPolicy.attempts
+                        self.state = "连接中断，等待重连"
+                        self.detail = "\(Int(delay)) 秒后进行第 \(self.reconnectAttempt) 次重连；可随时取消。"
+                        let retry = DispatchWorkItem { [weak self] in
+                            guard let self, self.generation == id, self.reconnecting else { return }
+                            self.reconnectWork = nil
+                            self.beginConnection(address: self.sessionHost, pin: "", credential: identity)
+                        }
+                        self.reconnectWork = retry
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
+                    }
                 }
                 self.refresh()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -207,7 +286,8 @@ final class ViewerModel: ObservableObject {
     }
 
     func disconnect() {
-        stopClipboard()
+        reconnectWork?.cancel(); reconnectWork = nil; reconnecting = false; retryPolicy.reset(); resumeIdentity = nil
+        stopClipboard(); stopAudio()
         connection?.releaseInputs()
         generation = UUID(); replayCancellation?.cancel()
         connection?.disconnect(); pipeline?.cancel()
@@ -234,6 +314,34 @@ final class ViewerModel: ObservableObject {
     }
 
     func releaseInputs() { clipboard.cancelPaste(); connection?.releaseInputs() }
+
+    private func startAudio(_ session: AudioSession, generation id: UUID) {
+        stopAudio()
+        let playback = AudioPlayback()
+        playback.setMuted(audioMuted); audioPlayback = playback
+        audioTransportStatus = "正在连接声音通道"; refreshAudioStatus()
+        let channel = AudioConnection(session: session, onPacket: { packet in playback.append(packet) }, onReady: { [weak self] in
+            guard let self, self.generation == id else { return }
+            self.audioTransportStatus = "声音通道就绪，等待鸿蒙共享声音"; self.refreshAudioStatus()
+        }, onFailure: { [weak self] reason in
+            guard let self, self.generation == id else { return }
+            self.stopAudio(); self.audioTransportStatus = "声音不可用：" + reason; self.refreshAudioStatus()
+        })
+        audioConnection = channel; channel.start()
+    }
+    private func stopAudio() {
+        audioConnection?.close(); audioConnection = nil; audioPlayback?.stop(); audioPlayback = nil
+        audioTransportStatus = "声音未连接"; refreshAudioStatus()
+    }
+    func setAudioMuted(_ muted: Bool) { audioMuted = muted; audioPlayback?.setMuted(muted); refreshAudioStatus() }
+
+    private func refreshAudioStatus() {
+        guard let audio = audioPlayback?.snapshot() else { audioStatus = audioTransportStatus; return }
+        if !audio.error.isEmpty { audioStatus = audio.error }
+        else if audioMuted { audioStatus = "已静音" }
+        else if audio.running { audioStatus = "正在播放系统声音" }
+        else { audioStatus = audioTransportStatus }
+    }
 
     private func startClipboard(_ session: ClipboardSession, generation id: UUID) {
         stopClipboard(); clipboard.start(epoch: session.epoch, mode: clipboardMode)
@@ -293,12 +401,19 @@ final class ViewerModel: ObservableObject {
 
     private func refresh() {
         if !replay, let snapshot = connection?.snapshot {
+            networkType = active ? snapshot.networkType : "已断开"
+            networkRTT = active ? snapshot.rttMilliseconds : nil
+            networkJitter = active ? snapshot.jitterMilliseconds : nil
+            videoMbps = active ? snapshot.videoMbps : 0; receivedFPS = active ? snapshot.receivedFPS : 0
+            if active && snapshot.videoReady { reconnecting = false }
+            if active && snapshot.receivedFrames > 0 { retryPolicy.reset(); reconnectAttempt = 0 }
             if receivedFrames != snapshot.receivedFrames { receivedFrames = snapshot.receivedFrames }
             if inputSupported != snapshot.inputSupported { inputSupported = snapshot.inputSupported }
             let enabled = active && snapshot.inputEnabled
             if inputEnabled != enabled { inputEnabled = enabled }
         }
         if active, let snapshot = pipeline?.snapshot { updateDecoder(snapshot) }
+        refreshAudioStatus()
         let display = mailbox.statistics
         if renderedFrames != display.submitted { renderedFrames = display.submitted }
         if displayReplacements != display.replaced { displayReplacements = display.replaced }
@@ -319,7 +434,7 @@ final class ViewerModel: ObservableObject {
 
     private func reportData() throws -> Data {
         let display = mailbox.statistics
-        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "appBuild": 7, "result": lastResult,
+        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.6.0", "appBuild": 8, "result": lastResult,
             "mode": replay ? "local_replay" : "live_lan", "host": replay ? "" : sessionHost,
             "startedAt": startedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "recordedAt": ISO8601DateFormatter().string(from: Date()),
@@ -328,6 +443,12 @@ final class ViewerModel: ObservableObject {
             "displayError": display.error, "dimensions": dimensions, "hardwareDecode": hardware,
             "inputControlMessagesSent": connection?.snapshot.inputSent ?? 0,
             "inputEnabledAtReport": inputEnabled,
+            "networkRTTMilliseconds": networkRTT as Any? ?? NSNull(),
+            "networkRTTJitterMilliseconds": networkJitter as Any? ?? NSNull(),
+            "networkRTTSamples": connection?.snapshot.rttSamples ?? 0,
+            "networkType": networkType, "videoPayloadMbps": videoMbps, "receivedFPS": receivedFPS,
+            "reconnectAttempt": reconnectAttempt, "reconnecting": reconnecting,
+            "audioMuted": audioMuted, "audioStatus": audioStatus,
             "clipboardMode": clipboardMode.rawValue, "clipboardConnected": clipboardConnected,
             "clipboardUpdatesSent": clipboard.sentCount, "clipboardUpdatesApplied": clipboard.appliedCount,
             "clipboardPasteCommitted": clipboard.committedCount, "clipboardLastBytes": clipboard.lastBytes,

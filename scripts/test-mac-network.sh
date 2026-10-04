@@ -18,6 +18,9 @@ swiftc -swift-version 5 -O -warnings-as-errors \
   -framework Network \
   "$project_dir/client-macos/Sources/WireProtocol.swift" \
   "$project_dir/client-macos/Sources/ClipboardProtocol.swift" \
+  "$project_dir/client-macos/Sources/PairingIdentity.swift" \
+  "$project_dir/client-macos/Sources/ConnectionPolicy.swift" \
+  "$project_dir/client-macos/Sources/AudioProtocol.swift" \
   "$project_dir/client-macos/Sources/LANConnection.swift" \
   "$project_dir/tests/mac_network_test.swift" \
   -o "$test_build_dir/mac-network-tests"

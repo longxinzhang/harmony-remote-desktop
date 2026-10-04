@@ -10,6 +10,9 @@ trap 'rm -rf "$test_dir"' EXIT
   "$project_dir/client-macos/Sources/ClipboardProtocol.swift" \
   "$project_dir/client-macos/Sources/ClipboardCoordinator.swift" \
   "$project_dir/client-macos/Sources/ClipboardChannel.swift" \
+  "$project_dir/client-macos/Sources/PairingIdentity.swift" \
+  "$project_dir/client-macos/Sources/ConnectionPolicy.swift" \
+  "$project_dir/client-macos/Sources/AudioProtocol.swift" \
   "$project_dir/client-macos/Sources/LANConnection.swift" \
   "$project_dir/client-macos/Sources/AppKitClipboardAdapter.swift" \
   "$project_dir/client-macos/Sources/RemoteInput.swift" \

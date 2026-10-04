@@ -18,7 +18,8 @@ fi
 "${CXX:-clang++}" -std=c++17 -Wall -Wextra -Werror -pthread -fsanitize=undefined \
   -DHRD_LAN_TESTING -I "$project_dir/host-harmony/entry/src/main/cpp" \
   "$project_dir/host-harmony/entry/src/main/cpp/lan_server.cpp" \
-  "$project_dir/tests/lan_server_test.cpp" -o "$test_binary"
+  "$project_dir/host-harmony/entry/src/main/cpp/pairing_identity.cpp" \
+  "$project_dir/tests/lan_server_test.cpp" -framework Security -framework CoreFoundation -o "$test_binary"
 
 if [[ "$run_tests" == true ]]; then
   "$test_binary"

@@ -7,7 +7,7 @@ export const encoderSnapshot: () => string;
 export const startLanServer: (bindAddress: string) => number;
 export const stopLanServer: () => void;
 export const lanSnapshot: () => string;
-export const startLanCapture: (filesDir: string, durationSeconds: number) => number;
+export const startLanCapture: (filesDir: string, durationSeconds: number, frameRate: number, systemAudio: boolean) => number;
 export const remoteInputSnapshot: () => string;
 export const allowRemoteInput: (allowed: boolean) => number;
 export const requestInputAuthorization: () => number;
@@ -21,3 +21,8 @@ export const saveDiagnostics: (filesDir: string, deviceJson: string) => number;
 export const allowClipboard: (allowed: boolean) => number;
 export const setClipboardPermission: (granted: boolean) => number;
 export const clipboardSnapshot: () => string;
+
+export const configurePairing: (filesDir: string) => number;
+export const allowPairing: (allowed: boolean) => number;
+export const revokePairing: () => number;
+export const audioSnapshot: () => string;

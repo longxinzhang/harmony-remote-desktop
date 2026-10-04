@@ -52,8 +52,9 @@ private enum WorkspaceColors {
 struct ViewerWindow: View {
     @ObservedObject var model: ViewerModel
     @State private var page: WorkspacePage = .desktop
+    @StateObject private var startup = StartupController()
 
-    private var showsSession: Bool { (model.active || model.decodedFrames > 0) && !showConnectionForm }
+    private var showsSession: Bool { (model.active || model.reconnecting || model.decodedFrames > 0) && !showConnectionForm }
     private var clipboardSelection: Binding<ClipboardMode> {
         Binding(get: { model.clipboardMode }, set: { model.setClipboardMode($0) })
     }
@@ -61,6 +62,7 @@ struct ViewerWindow: View {
         Binding(get: { model.keyboardMode }, set: { model.changeKeyboardMode($0) })
     }
     private var sessionTitle: String {
+        if model.reconnecting { return "正在重连 · 第 \(model.reconnectAttempt) 次" }
         if model.replay { return "本地回放" }
         if model.failed { return "连接遇到问题" }
         if model.active { return model.decodedFrames > 0 ? "正在共享屏幕" : "正在建立连接" }
@@ -90,6 +92,8 @@ struct ViewerWindow: View {
         .foregroundStyle(WorkspaceColors.ink)
         .tint(WorkspaceColors.blue)
         .preferredColorScheme(.light)
+        .onAppear { model.reloadTrustedPeers(); startup.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in startup.refresh() }
     }
 
     private var sidebar: some View {
@@ -201,6 +205,20 @@ struct ViewerWindow: View {
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(22).workspaceCard()
                     }.frame(width: 226)
                 }
+                if !model.trustedPeers.isEmpty {
+                    settingsCard("已配对设备", symbol: "checkmark.shield") {
+                        ForEach(model.trustedPeers) { peer in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(peer.host).font(.system(size: 14, design: .monospaced))
+                                    Text("身份 \(peer.fingerprint)").font(.caption).foregroundStyle(WorkspaceColors.muted)
+                                }
+                                Spacer()
+                                Button("连接") { model.connectTrusted(peer) }.disabled(model.active || model.reconnecting)
+                            }
+                        }
+                    }
+                }
                 VStack(alignment: .leading, spacing: 17) {
                     Text("开始只需三步").font(.system(size: 14, weight: .semibold))
                     HStack(alignment: .top, spacing: 22) {
@@ -224,15 +242,19 @@ struct ViewerWindow: View {
                 .textFieldStyle(.plain).font(.system(size: 15, design: .monospaced))
                 .padding(12).background(WorkspaceColors.canvas, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(WorkspaceColors.line, lineWidth: 1))
-                .accessibilityLabel("鸿蒙 PC 地址").disabled(model.active)
+                .accessibilityLabel("鸿蒙 PC 地址").disabled(model.active || model.reconnecting)
                 .padding(.bottom, 18)
             Text("配对码").font(.system(size: 12, weight: .medium)).padding(.bottom, 8)
             SecureField("6 位 PIN", text: $model.pin)
                 .textFieldStyle(.plain).font(.system(size: 15, design: .monospaced))
                 .padding(12).background(WorkspaceColors.canvas, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(WorkspaceColors.line, lineWidth: 1))
-                .accessibilityLabel("配对 PIN").disabled(model.active)
-                .onSubmit { model.connect() }.padding(.bottom, 24)
+                .accessibilityLabel("配对 PIN").disabled(model.active || model.reconnecting)
+                .onSubmit { model.connect() }.padding(.bottom, 14)
+            Toggle("记住这台设备", isOn: $model.rememberDevice).toggleStyle(.checkbox).disabled(model.active || model.reconnecting)
+                .font(.system(size: 12)).padding(.bottom, 7)
+            Text("已保存配对时可留空；首次记住设备需鸿蒙端允许。")
+                .font(.system(size: 11)).foregroundStyle(WorkspaceColors.muted).fixedSize(horizontal: false, vertical: true).padding(.bottom, 20)
             Button { model.connect() } label: {
                 HStack(spacing: 9) {
                     Text("连接设备").font(.system(size: 14, weight: .semibold))
@@ -240,7 +262,7 @@ struct ViewerWindow: View {
                 }.frame(maxWidth: .infinity).frame(height: 40)
             }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.active)
             if model.failed {
-                Label("\(model.state)。检查连接信息后重试。", systemImage: "exclamationmark.circle")
+                Label(model.detail, systemImage: "exclamationmark.circle")
                     .font(.system(size: 12)).foregroundStyle(.red).padding(.top, 14)
                 Button("查看详细原因") { selectPage(.development) }
                     .font(.caption).buttonStyle(.plain).foregroundStyle(WorkspaceColors.blue).padding(.top, 7)
@@ -289,8 +311,11 @@ struct ViewerWindow: View {
                     } label: {
                         Label("剪贴板", systemImage: "doc.on.clipboard")
                     }.fixedSize().disabled(model.replay).help(model.clipboardStatus)
-                    Button(model.active ? "断开" : "返回连接") {
-                        if model.active { model.disconnect() }
+                    Button { model.setAudioMuted(!model.audioMuted) } label: {
+                        Image(systemName: model.audioMuted ? "speaker.slash" : "speaker.wave.2")
+                    }.help(model.audioMuted ? "取消静音" : "静音").disabled(model.replay || !model.active)
+                    Button(model.reconnecting ? "取消重连" : model.active ? "断开" : "返回连接") {
+                        if model.active || model.reconnecting { model.disconnect() }
                         else {
                             // Retain the last-frame model state; this view-only flag
                             // returns to the form without inventing a new session.
@@ -312,8 +337,8 @@ struct ViewerWindow: View {
                     VStack(spacing: 14) {
                         Image(systemName: "display.2").font(.system(size: 42, weight: .light))
                             .foregroundStyle(.white.opacity(0.72))
-                        Text("等待鸿蒙端共享屏幕").font(.system(size: 18, weight: .medium))
-                        Text("连接建立后，请在鸿蒙端开始共享并允许系统授权。")
+                        Text(model.reconnecting ? "连接中断，正在重连" : "等待鸿蒙端共享屏幕").font(.system(size: 18, weight: .medium))
+                        Text(model.reconnecting ? model.detail : "连接建立后，请在鸿蒙端开始共享并允许系统授权。")
                             .font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                     }.foregroundStyle(.white).padding(24).allowsHitTesting(false)
                 }
@@ -392,6 +417,33 @@ struct ViewerWindow: View {
                             .font(.system(size: 12)).foregroundStyle(WorkspaceColors.muted).lineSpacing(4)
                             .fixedSize(horizontal: false, vertical: true).padding(.top, 12)
                     }
+                    settingsCard("连接与配对", symbol: "checkmark.shield") {
+                        Toggle("断线后自动重连", isOn: Binding(get: { model.automaticReconnect }, set: { model.setAutomaticReconnect($0) }))
+                        Text("仅恢复已校验设备的连接；不回放旧按键或剪贴板。共享授权已结束时，需在鸿蒙端重新允许共享。")
+                            .font(.caption).foregroundStyle(WorkspaceColors.muted).fixedSize(horizontal: false, vertical: true)
+                        Text(model.pairingStatus).font(.caption).foregroundStyle(WorkspaceColors.muted)
+                        ForEach(model.trustedPeers) { peer in
+                            HStack { Text(peer.host); Spacer(); Text(peer.fingerprint).font(.caption.monospaced()); Button("移除配对") { model.forgetPeer(peer) } }
+                        }
+                        Button("刷新已配对设备") { model.reloadTrustedPeers() }
+                    }
+                    settingsCard("声音与画面", symbol: "speaker.wave.2") {
+                        Toggle("静音远端声音", isOn: Binding(get: { model.audioMuted }, set: { model.setAudioMuted($0) }))
+                        Text(model.audioStatus).font(.caption).foregroundStyle(WorkspaceColors.muted)
+                        Text("在鸿蒙端设置 30 / 60 帧和共享系统声音，于下一次共享生效。60 帧须设备编码器支持；不采集麦克风。")
+                            .font(.caption).foregroundStyle(WorkspaceColors.muted).fixedSize(horizontal: false, vertical: true)
+                    }
+                    settingsCard("启动", symbol: "power") {
+                        Toggle("登录 Mac 后启动", isOn: Binding(get: { startup.enabled }, set: { startup.setEnabled($0) })).disabled(startup.busy)
+                        Text(startup.status.summary).font(.system(size: 13, weight: .medium))
+                        Text(startup.status.detail).font(.caption).foregroundStyle(WorkspaceColors.muted).fixedSize(horizontal: false, vertical: true)
+                        if let error = startup.lastError { Text(error).font(.caption).foregroundStyle(.red) }
+                        HStack {
+                            Button("打开系统登录项") { startup.openSystemSettings() }
+                            Button("刷新状态") { startup.refresh() }
+                            if startup.status == .requiresApproval { Button("取消登录启动请求") { startup.setEnabled(false) } }
+                        }
+                    }
                     settingsCard("连接方式", symbol: "network") {
                         HStack {
                             VStack(alignment: .leading, spacing: 7) {
@@ -439,6 +491,18 @@ struct ViewerWindow: View {
                         Text("诊断不包含配对码和剪贴板正文。")
                             .font(.system(size: 11)).foregroundStyle(WorkspaceColors.muted)
                     }
+                    settingsCard("网络状态", symbol: "network") {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), alignment: .leading, spacing: 24) {
+                            diagnosticMetric("连接网络", model.networkType)
+                            diagnosticMetric("网络 RTT", milliseconds(model.networkRTT))
+                            diagnosticMetric("RTT 波动", milliseconds(model.networkJitter))
+                            diagnosticMetric("视频码率", String(format: "%.2f Mbps", model.videoMbps))
+                            diagnosticMetric("接收帧率", String(format: "%.1f FPS", model.receivedFPS))
+                            diagnosticMetric("声音", model.audioStatus)
+                        }
+                        Text("RTT 是控制消息的往返耗时，不代表画面端到端延迟。视频码率只统计视频有效载荷；未估算 TCP 丢包率。")
+                            .font(.caption).foregroundStyle(WorkspaceColors.muted).fixedSize(horizontal: false, vertical: true)
+                    }
                     settingsCard("画面与解码", symbol: "chart.bar.xaxis") {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), alignment: .leading, spacing: 24) {
                             diagnosticMetric("接收帧数", "\(model.receivedFrames)")
@@ -483,11 +547,17 @@ struct ViewerWindow: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func milliseconds(_ value: Double?) -> String { value.map { String(format: "%.1f ms", $0) } ?? "—" }
+
     private var statusBar: some View {
         HStack(spacing: 8) {
             Circle().fill(model.failed ? .red : model.active ? .green : WorkspaceColors.muted.opacity(0.6))
                 .frame(width: 6, height: 6)
             Text(sessionTitle).font(.system(size: 11))
+            if model.active && !model.replay {
+                Text("· \(milliseconds(model.networkRTT)) · \(String(format: "%.1f", model.receivedFPS)) FPS · \(String(format: "%.1f", model.videoMbps)) Mbps")
+                    .font(.system(size: 10, design: .monospaced))
+            }
             Spacer()
             if page != .desktop && model.active {
                 Button("返回远程画面") { selectPage(.desktop) }.buttonStyle(.plain)

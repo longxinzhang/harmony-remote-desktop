@@ -65,7 +65,7 @@ final class FramePresentationScheduler {
     private let present: () -> Void
     var isScheduled: Bool { timer != nil }
 
-    init(interval: TimeInterval = 1.0 / 30.0, present: @escaping () -> Void) {
+    init(interval: TimeInterval = 1.0 / 60.0, present: @escaping () -> Void) {
         self.interval = interval; self.present = present
     }
     func request() {

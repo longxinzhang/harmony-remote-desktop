@@ -438,6 +438,180 @@ private func inputIntegrationTests(path: String, overflow: Bool) throws {
     client = nil
 }
 
+// A deterministic wire peer is needed here: a real Host observes video EOF and
+// may close control first, hiding whether the Mac incorrectly sent an explicit
+// stop. This peer retains control until the Mac closes it, and records the bytes.
+private final class CleanupWireFixture {
+    let controlPort: UInt16
+    let videoPort: UInt16
+    private let controlListener: Int32
+    private let videoListener: Int32
+    private let lock = NSLock()
+    private let finished = DispatchSemaphore(value: 0)
+    private var videoSocket: Int32 = -1
+    private var controls: [String] = []
+    private var failure: String?
+
+    init() throws {
+        let control = try Self.listen()
+        controlListener = control.0; controlPort = control.1
+        do {
+            let video = try Self.listen()
+            videoListener = video.0; videoPort = video.1
+        } catch { Darwin.close(control.0); throw error }
+        DispatchQueue(label: "HarmonyRemote.CleanupWireFixture").async { [self] in
+            do { try run() } catch { lock.lock(); failure = String(describing: error); lock.unlock() }
+            finished.signal()
+        }
+    }
+
+    deinit { Darwin.close(controlListener); Darwin.close(videoListener) }
+
+    private static func listen() throws -> (Int32, UInt16) {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw TestFailure(description: "cleanup fixture socket failed") }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 && Darwin.listen(fd, 1) == 0 else {
+            Darwin.close(fd); throw TestFailure(description: "cleanup fixture bind/listen failed")
+        }
+        var size = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &size) }
+        }
+        guard named == 0 else { Darwin.close(fd); throw TestFailure(description: "cleanup fixture port lookup failed") }
+        return (fd, UInt16(bigEndian: address.sin_port))
+    }
+
+    private func accept(_ listener: Int32) throws -> Int32 {
+        var event = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+        guard poll(&event, 1, 5000) > 0 else { throw TestFailure(description: "cleanup fixture accept timeout") }
+        let fd = Darwin.accept(listener, nil, nil)
+        guard fd >= 0 else { throw TestFailure(description: "cleanup fixture accept failed") }
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        return fd
+    }
+
+    private func read(_ count: Int, socket: Int32) throws -> Data? {
+        var data = Data()
+        while data.count < count {
+            var block = [UInt8](repeating: 0, count: count - data.count)
+            let received = recv(socket, &block, block.count, 0)
+            if received == 0 && data.isEmpty { return nil }
+            if received < 0 && errno == EINTR { continue }
+            guard received > 0 else { throw TestFailure(description: "cleanup fixture partial read/timeout") }
+            data.append(contentsOf: block.prefix(received))
+        }
+        return data
+    }
+
+    private func readObject(_ socket: Int32) throws -> [String: Any]? {
+        guard let header = try read(4, socket: socket) else { return nil }
+        let length = Int(WireProtocol.uint(header))
+        guard (1...4096).contains(length), let body = try read(length, socket: socket) else {
+            throw TestFailure(description: "cleanup fixture invalid control frame")
+        }
+        return try WireProtocol.controlObject(body)
+    }
+
+    private func write(_ data: Data, socket: Int32) throws {
+        try data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            var offset = 0
+            while offset < bytes.count {
+                let sent = Darwin.send(socket, bytes.baseAddress!.advanced(by: offset), bytes.count - offset, 0)
+                if sent < 0 && errno == EINTR { continue }
+                guard sent > 0 else { throw TestFailure(description: "cleanup fixture send failed") }
+                offset += sent
+            }
+        }
+    }
+
+    private func run() throws {
+        let control = try accept(controlListener)
+        defer { Darwin.close(control) }
+        let greeting = try readObject(control)
+        try require(greeting?["type"] as? String == "hello", "cleanup fixture expected hello")
+        try write(WireProtocol.controlFrame(["type": "hello_ack", "protocol": 1, "pairingRequired": true,
+            "timestampSource": "encoder_callback_monotonic", "nativePtsUnitVerified": false,
+            "inputSupported": true]), socket: control)
+        let pairing = try readObject(control)
+        try require(pairing?["type"] as? String == "pair", "cleanup fixture expected pair")
+        let token = String(repeating: "ab", count: 32)
+        try write(WireProtocol.controlFrame(["type": "pair_ok", "sessionToken": token]), socket: control)
+        let video = try accept(videoListener)
+        defer { lock.lock(); videoSocket = -1; lock.unlock(); Darwin.close(video) }
+        lock.lock(); videoSocket = video; lock.unlock()
+        let attach = try readObject(video)
+        try require(attach?["type"] as? String == "video_attach", "cleanup fixture expected video attach")
+        try write(WireProtocol.controlFrame(["type": "video_ready"]), socket: video)
+        try write(packet(1, 0, config) + packet(2, 1, idr, flags: 1), socket: video)
+        while let object = try readObject(control) {
+            if let type = object["type"] as? String {
+                lock.lock(); controls.append(type); lock.unlock()
+                if type == "ping" {
+                    try write(WireProtocol.controlFrame(["type": "pong", "sessionToken": token]), socket: control)
+                }
+            }
+        }
+    }
+
+    func breakOnlyVideoOutput() throws {
+        lock.lock(); defer { lock.unlock() }
+        try require(videoSocket >= 0 && shutdown(videoSocket, SHUT_WR) == 0, "cleanup fixture could not half-close video")
+    }
+
+    func waitForControls() throws -> [String] {
+        try require(finished.wait(timeout: .now() + 6) == .success, "cleanup fixture control did not close")
+        lock.lock(); let error = failure; let captured = controls; lock.unlock()
+        if let error { throw TestFailure(description: error) }
+        return captured
+    }
+}
+
+private func transportCleanupIntegrationTests(manual: Bool) throws {
+    let fixture = try CleanupWireFixture()
+    let firstFrame = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+    let lock = NSLock()
+    var outcome: Result<Void, Error>?
+    var completions = 0
+    let client = LANConnection(testControlPort: fixture.controlPort, testVideoPort: fixture.videoPort,
+        onStatus: { _ in }, onPacket: { if $0.type == 2 { firstFrame.signal() } }, onEnd: { result in
+            lock.lock(); outcome = result; completions += 1; lock.unlock(); completed.signal()
+        })
+    client.connect(host: "127.0.0.1", pin: "123456")
+    defer { client.disconnect() }
+    try require(firstFrame.wait(timeout: .now() + 6) == .success, "cleanup test did not receive first AU")
+    try require(client.snapshot.paired && client.snapshot.videoReady && client.snapshot.receivedFrames == 1,
+                "cleanup test must start from a live paired video connection")
+    if manual { client.disconnect() } else { try fixture.breakOnlyVideoOutput() }
+    try require(completed.wait(timeout: .now() + 6) == .success, "cleanup test client did not finish")
+    let captured = try fixture.waitForControls().filter { $0 != "ping" && $0 != "pong" }
+    lock.lock(); let final = outcome; let count = completions; lock.unlock()
+    try require(count == 1 && !client.snapshot.inputEnabled, "cleanup did not finish exactly once with input disabled")
+    if manual {
+        guard case .failure(let error)? = final, case LANError.cancelled = error else {
+            throw TestFailure(description: "manual disconnect did not remain explicit cancellation")
+        }
+        try require(captured == ["release_all_keys", "stop"], "manual disconnect must release input before explicit stop")
+    } else {
+        guard case .failure(let error)? = final, case LANError.connectionClosed = error else {
+            throw TestFailure(description: "video-only EOF did not report a retryable transport failure")
+        }
+        try require(captured.isEmpty, "video-only failure sent stop over live control, cancelling Host capture grace")
+    }
+}
+
 @main
 private enum NetworkTests {
     static func main() throws {
@@ -454,11 +628,14 @@ private enum NetworkTests {
         try sessionLifetimeIntegrationTests(path: fixture, duringStream: true)
         try inputIntegrationTests(path: fixture, overflow: false)
         try inputIntegrationTests(path: fixture, overflow: true)
+        try transportCleanupIntegrationTests(manual: false)
+        try transportCleanupIntegrationTests(manual: true)
         print("mac network tests passed: \(parserCount) parser, \(controlCount) control/address, \(integrationCount) NWConnection integration/lifecycle")
         print("input tests passed: \(inputCount) validation/cap cases, 2 actual C++ ordered-input/revoke/overflow fixtures")
         print("session deadline tests passed: \(deadlineCount) simulated-clock cases; bounded first-AU wait, no active lifetime limit")
         print("session receive tests passed: 2 actual C++/NWConnection fixtures; expired waiting rejects video, active stream survives simulated one-year clock advance")
         print("long stream tests passed: \(longStreamCount) cases; >2 GiB processed in bounded batches, overflow guarded, replay64MiB/single-packet limits retained")
+        print("transport cleanup tests passed: 2 real NWConnection/POSIX peers; video-only EOF keeps control free of stop, manual cancel sends release then stop")
         print("Actual C++ fixture payload matched byte-for-byte; this does not verify a real device or decoder.")
     }
 }

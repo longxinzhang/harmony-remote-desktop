@@ -20,6 +20,7 @@ struct LanServerTestOptions {
     int ioTimeoutMs = 2000;
     int pinLifetimeMs = 300000;
     int sendBufferBytes = 0;
+    int reconnectGraceMs = 60000;
     bool allowLoopback = true;
 };
 #endif
@@ -41,11 +42,22 @@ struct LanClipboardHooks {
     std::function<uint16_t()> port;
 };
 
+struct LanAudioHooks {
+    std::function<bool(const std::string&)> start;
+    std::function<void()> stop;
+    std::function<bool(std::string&, std::string&)> pair;
+    std::function<void()> disconnect;
+    std::function<uint16_t()> port;
+};
+
 class LanServer final {
 public:
     LanServer();
 #ifdef HRD_LAN_TESTING
     explicit LanServer(const LanServerTestOptions& options);
+    // Deterministic transport fault for real client integration tests. Never
+    // compiled into the application library.
+    void InterruptVideoWriteForTest();
 #endif
     ~LanServer();
     LanServer(const LanServer&) = delete;
@@ -60,6 +72,18 @@ public:
     // Install before Start. Callbacks are serialized without holding the server state mutex.
     void SetInputHooks(LanInputHooks hooks);
     void SetClipboardHooks(LanClipboardHooks hooks);
+    void SetAudioHooks(LanAudioHooks hooks);
+    // Configure with UIAbilityContext.filesDir before Start. HUKS keeps the
+    // private identity; only signed public peer keys are written here.
+    bool ConfigurePairingStorage(const std::string& appFilesDirectory);
+    void SetPairingAllowed(bool allowed);
+    bool RevokePairedDevices();
+    // The existing authorized encoder consumes this after a reconnect. No new
+    // screen-capture authorization is requested or restored by the server.
+    bool ConsumeKeyframeRequest();
+    // True only while a freshly authenticated same-peer session inherits the
+    // bounded, still-authorized capture. Used to gate auxiliary audio resume.
+    bool CanResumeCapture();
     // Copies into a bounded queue; performs no socket I/O. CONFIG precedes IDR.
     // At most 3 queued AUs (including empty EOS) and one CONFIG, plus sender's packet.
     bool Publish(const uint8_t* data, size_t size, uint64_t ptsUs,

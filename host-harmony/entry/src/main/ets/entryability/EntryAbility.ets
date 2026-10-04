@@ -6,6 +6,10 @@ import probe from 'libhrd_probe.so';
 export default class EntryAbility extends UIAbility {
   onWindowStageCreate(windowStage: window.WindowStage): void {
     PersistentStorage.persistProp<string>('hrdSessionMode', 'permanent');
+    PersistentStorage.persistProp<boolean>('hrdStartServerOnLaunch', false);
+    PersistentStorage.persistProp<number>('hrdFrameRate', 30);
+    PersistentStorage.persistProp<boolean>('hrdCaptureAudio', false);
+    probe.configurePairing(this.context.filesDir);
     AppStorage.setOrCreate('probeFilesDir', this.context.filesDir);
     windowStage.loadContent('pages/Index', (error) => {
       if (error.code) {

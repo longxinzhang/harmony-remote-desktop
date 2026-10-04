@@ -12,6 +12,10 @@ struct EncoderStreamHooks {
     // ptsUs is relative encoder-callback monotonic time, not capture time/native PTS.
     std::function<bool(const uint8_t*, size_t, uint64_t, bool, bool, bool)> packet;
     std::function<bool()> cancelled;
+    // Capture callback: copy-only sink; internal playback PCM, 48 kHz stereo S16LE.
+    std::function<bool(const uint8_t*, size_t, uint64_t)> audioPCM;
+    // Worker polls; true requests a fresh IDR after authenticated reconnect.
+    std::function<bool()> requestKeyframe;
     // Called exactly once per Start attempt, after owned SDK resources are released.
     std::function<void(bool)> finished;
 };
@@ -21,6 +25,8 @@ struct EncoderSessionOptions {
     int durationSeconds = encoder_session::LOCAL_PROBE_SECONDS;
     // LAN accepts only 600 (debug) or 0 (until stopped), always false here.
     bool recordLocally = true;
+    int frameRate = 30; // Only 30 or 60; checked against hardware capability.
+    bool captureSystemAudio = false; // Applies next share, microphone stays disabled.
 };
 
 class EncoderProbe final {
@@ -34,6 +40,7 @@ public:
     int Start(const std::string& filesDir, EncoderStreamHooks hooks = {}, EncoderSessionOptions options = {});
     void Stop();
     bool IsRunning();
+    bool IsSystemAudioRunning();
     std::string SnapshotJson();
 private:
     struct Impl;

@@ -1,5 +1,6 @@
 #include "lan_server.h"
 #include "clipboard_wire.h"
+#include "pairing_identity.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -43,6 +44,7 @@ struct Options {
     int ioTimeoutMs = 2000;
     int pinLifetimeMs = 300000;
     int sendBufferBytes = 0;
+    int reconnectGraceMs = 60000;
     bool allowLoopback = false;
 };
 
@@ -456,6 +458,15 @@ struct LanServer::Impl {
     LanInputHooks inputHooks;
     LanClipboardHooks clipboardHooks;
     bool clipboardStarted = false;
+    LanAudioHooks audioHooks;
+    bool audioStarted = false;
+    PairingIdentity identity;
+    bool pairingAllowed = false, modernPeer = false;
+    std::string challenge, currentPeerKey, capturePeerKey;
+    bool reconnecting = false, reconnectRequested = false, keyframeRequested = false, awaitingReconnectIdr = false;
+    Time reconnectDeadline {};
+    std::vector<uint8_t> latestConfig;
+    uint64_t reconnectCount = 0, pairingGeneration = 0;
     std::deque<std::string> pasteOperations;
     bool inputEnabled = false, inputDeactivatePending = false, inputStatusPending = false;
     uint64_t inputAccepted = 0, inputRejected = 0, inputReleases = 0;
@@ -575,6 +586,7 @@ struct LanServer::Impl {
     {
         if (streaming && !cancelled.load()) ++abortedStreams;
         cancelled.store(true);
+        reconnecting = false; reconnectRequested = false; keyframeRequested = false; awaitingReconnectIdr = false;
         inputStatusPending = inputStatusPending || inputEnabled;
         inputEnabled = false; inputDeactivatePending = true;
         streaming = false;
@@ -586,12 +598,15 @@ struct LanServer::Impl {
         cv.notify_all();
     }
 
-    void Disconnect(const std::string& reason, bool allowCompletedEos = false)
+    void Disconnect(const std::string& reason, bool allowCompletedEos = false, bool allowReconnect = false)
     {
         DisableInput();
         LanClipboardHooks clipboard;
         { std::lock_guard<std::mutex> lock(mutex); clipboard = clipboardHooks; pasteOperations.clear(); }
         try { if (clipboard.disconnect) clipboard.disconnect(); } catch (...) {}
+        LanAudioHooks audio;
+        { std::lock_guard<std::mutex> lock(mutex); audio = audioHooks; }
+        try { if (audio.disconnect) audio.disconnect(); } catch (...) {}
         Sock oldControl, oldVideo;
         {
             std::unique_lock<std::mutex> lock(mutex);
@@ -603,12 +618,23 @@ struct LanServer::Impl {
             // Client may close immediately after receiving EOS, before the encoder
             // worker calls EndStream(true). Preserve this completed network drain.
             bool normalEosClose = allowCompletedEos && eosSent && !cancelled.load();
-            if (!normalEosClose && streaming && !cancelled.load()) ++abortedStreams;
-            if (!normalEosClose) cancelled.store(true);
-            streaming = false; paired = false; ending = false;
-            token.clear(); ClearQueueLocked(); disconnectRequested = false; ++epoch;
+            bool wasPaired = paired;
+            // Keep only the already authorized capture alive, for a bounded
+            // interval. No old frames or input permission cross this boundary.
+            bool keepCapture = running.load() && !normalEosClose && !cancelled.load() && !eosQueued &&
+                !(allowCompletedEos && reason.empty()) &&
+                ((reconnecting && Clock::now() < reconnectDeadline) || (allowReconnect && modernPeer && streaming));
+            if (keepCapture && !reconnecting) reconnectDeadline = Clock::now() + std::chrono::milliseconds(options.reconnectGraceMs);
+            if (!normalEosClose && !keepCapture && streaming && !cancelled.load()) ++abortedStreams;
+            if (!normalEosClose && !keepCapture) cancelled.store(true);
+            reconnecting = keepCapture; streaming = keepCapture; paired = false; ending = false; modernPeer = false;
+            challenge.clear(); currentPeerKey.clear(); token.clear(); ClearQueueLocked(); disconnectRequested = false; reconnectRequested = false; ++epoch;
+            if (keepCapture) { needsConfig = true; needsIdr = true; hasAu = false; sequence = 0; lastPts = 0; }
             if (!normalEosClose && !reason.empty()) error = reason;
-            status = running.load() ? "LISTENING" : "STOPPED";
+            status = running.load() ? (keepCapture ? "RECONNECTING" : "LISTENING") : "STOPPED";
+            // Legacy/manual clients always get a new one-use PIN without a
+            // service restart. A failed attempt never renews the old PIN TTL.
+            if (running.load() && wasPaired) { pin = NewPin(); pinUsed = false; pinAttempts = 0; pinExpires = Clock::now() + std::chrono::milliseconds(options.pinLifetimeMs); }
         }
         // shared ownership prevents descriptor reuse while a sender still holds it.
         if (oldControl) oldControl->Shutdown();
@@ -633,6 +659,10 @@ struct LanServer::Impl {
         LanClipboardHooks clipboard;
         { std::lock_guard<std::mutex> lock(mutex); clipboard = clipboardHooks; clipboardStarted = false; }
         try { if (clipboard.stop) clipboard.stop(); } catch (...) {}
+        LanAudioHooks audio;
+        { std::lock_guard<std::mutex> lock(mutex); audio = audioHooks; audioStarted = false; }
+        try { if (audio.stop) audio.stop(); } catch (...) {}
+        identity.ClearEphemeral();
         // A final sweep covers a worker finishing an accept during shutdown.
         Disconnect("", true);
         std::lock_guard<std::mutex> lock(mutex);
@@ -670,7 +700,11 @@ struct LanServer::Impl {
             if (currentEpoch == epoch && currentStream == streamId) eosSending = false;
             cv.notify_all();
             if (currentEpoch != epoch || currentStream != streamId || cancelled.load()) continue;
-            if (!ok) { AbortLocked("video_send_failed_or_timed_out"); continue; }
+            if (!ok) {
+                if (modernPeer && streaming && !eosQueued) { reconnectRequested = true; disconnectRequested = true; error = "video_send_failed_or_timed_out"; }
+                else AbortLocked("video_send_failed_or_timed_out");
+                continue;
+            }
             ++sentPackets; sentBytes += header.size() + packet.bytes.size();
             if (packet.type == 2 && !packet.bytes.empty()) ++sentFrames;
             if (packet.flags & 2) {
@@ -699,12 +733,45 @@ struct LanServer::Impl {
                 hello = true;
                 { std::lock_guard<std::mutex> lock(mutex); status = "AWAITING_PAIR"; }
                 bool supported; { std::lock_guard<std::mutex> lock(mutex); supported = InputSupportedLocked(); }
+                std::string identityFields;
+                if (identity.Available()) {
+                    std::string fresh = NewToken(), publicKey = identity.PublicKey();
+                    std::string proof = identity.Sign("HRDHELLO1\n" + fresh + "\n" + publicKey);
+                    if (fresh.empty() || proof.empty()) { ReplyError(socket, "pairing_identity_unavailable"); return false; }
+                    bool enrollmentAllowed;
+                    { std::lock_guard<std::mutex> lock(mutex); challenge = fresh; enrollmentAllowed = pairingAllowed; }
+                    identityFields = ",\"pairingScheme\":\"p256-sha256-v1\",\"hostPublicKey\":" + Quote(publicKey) +
+                        ",\"challenge\":" + Quote(fresh) + ",\"hostHelloSignature\":" + Quote(proof) +
+                        ",\"rememberAllowed\":" + (enrollmentAllowed ? "true" : "false");
+                }
                 return SendJson(socket, "{\"type\":\"hello_ack\",\"protocol\":1,\"deviceName\":\"HarmonyOS-PC\",\"os\":\"HarmonyOS 7\",\"pairingRequired\":true,\"timestampSource\":\"encoder_callback_monotonic\",\"nativePtsUnitVerified\":false,\"inputSupported\":" + std::string(supported ? "true" : "false") + ",\"clipboardSupported\":" + (clipboardStarted ? "true" : "false") +
-                    (clipboardStarted ? ",\"clipboardPort\":" + std::to_string(clipboardHooks.port()) : "") + "}", options.ioTimeoutMs, running);
+                    (clipboardStarted ? ",\"clipboardPort\":" + std::to_string(clipboardHooks.port()) : "") +
+                    ",\"rttSupported\":true,\"audioSupported\":" + (audioStarted ? "true" : "false") +
+                    (audioStarted ? ",\"audioPort\":" + std::to_string(audioHooks.port()) : "") + identityFields + "}", options.ioTimeoutMs, running);
             }
-            if (type != "pair") { ReplyError(socket, "pair_required"); return false; }
+            const bool resume = type == "pair_resume";
+            if (type != "pair" && !resume) { ReplyError(socket, "pair_required"); return false; }
+            const std::string clientKey = Field(object, "clientPublicKey");
+            const bool modern = !clientKey.empty() || resume || object.count("remember") || object.count("clientSignature");
+            bool remember = false;
+            std::string transcript;
             std::string failure;
-            {
+            uint64_t authorizationGeneration;
+            { std::lock_guard<std::mutex> lock(mutex); authorizationGeneration = pairingGeneration; }
+            if (modern) {
+                std::string fresh; bool enrollmentAllowed;
+                { std::lock_guard<std::mutex> lock(mutex); fresh = std::move(challenge); challenge.clear(); enrollmentAllowed = pairingAllowed; }
+                if (!identity.Available() || fresh.empty() || !BooleanField(object, "remember", remember) ||
+                    !clipboard_wire::Hex(Field(object, "clientChallenge"), 64) ||
+                    !PairingIdentity::ValidPublicKey(clientKey) || object.size() != (resume ? 5 : 6)) failure = "invalid_pairing_proof";
+                else {
+                    transcript = PairingIdentity::Transcript(fresh, Field(object, "clientChallenge"), identity.PublicKey(), clientKey, resume, remember);
+                    if (!PairingIdentity::Verify(clientKey, transcript, Field(object, "clientSignature"))) failure = "invalid_pairing_proof";
+                    else if (resume && !identity.Trusted(clientKey, remember)) failure = "pairing_not_trusted";
+                    else if (!resume && remember && !enrollmentAllowed) failure = "persistent_pairing_not_allowed";
+                }
+            } else if (object.size() != 2) failure = "invalid_pair_message";
+            if (failure.empty() && !resume) {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (pinUsed || pin.empty() || Clock::now() >= pinExpires) { pin.clear(); failure = "pin_unavailable_restart_server"; }
                 else if (!SecretEqual(Field(object, "pin"), pin)) {
@@ -716,10 +783,25 @@ struct LanServer::Impl {
             if (!failure.empty()) { ReplyError(socket, failure); return false; }
             session = NewToken();
             if (session.empty()) { ReplyError(socket, "entropy_unavailable"); return false; }
+            std::string identityFields;
+            if (modern) {
+                std::string proof = identity.Sign(transcript + "\nhost\n" + session);
+                if (proof.empty()) { ReplyError(socket, "pairing_identity_unavailable"); return false; }
+                identityFields = ",\"hostSignature\":" + Quote(proof) + ",\"remembered\":" + (remember ? "true" : "false");
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                if (!running.load()) return false;
-                pinUsed = true; pin.clear(); token = session; paired = true; status = "PAIRED";
+                if (!running.load() || authorizationGeneration != pairingGeneration || disconnectRequested) return false;
+                if (modern && !resume && ((remember && !pairingAllowed) || !identity.Enroll(clientKey, remember))) {
+                    error = "pairing_store_failed_or_revoked"; return false;
+                }
+                if (reconnecting && (!modern || clientKey != capturePeerKey)) {
+                    // A different PIN-authorized viewer must request a new
+                    // screen share; it cannot inherit another peer's capture.
+                    cancelled.store(true); streaming = false; reconnecting = false; ClearQueueLocked();
+                }
+                currentPeerKey = modern ? clientKey : "";
+                pinUsed = true; pin.clear(); token = session; paired = true; modernPeer = modern; status = "PAIRED";
             }
             std::string clipboardFields;
             if (clipboardStarted && clipboardHooks.pair) {
@@ -727,8 +809,14 @@ struct LanServer::Impl {
                 if (clipboardHooks.pair(clipboardEpoch, bindToken)) clipboardFields =
                     ",\"clipboardEpoch\":" + Quote(clipboardEpoch) + ",\"clipboardBindToken\":" + Quote(bindToken);
             }
+            std::string audioFields;
+            if (audioStarted && audioHooks.pair) {
+                std::string audioEpoch, bindToken;
+                if (audioHooks.pair(audioEpoch, bindToken)) audioFields =
+                    ",\"audioPort\":" + std::to_string(audioHooks.port()) + ",\"audioEpoch\":" + Quote(audioEpoch) + ",\"audioBindToken\":" + Quote(bindToken);
+            }
             lastRx = lastPing = Clock::now();
-            return SendJson(socket, "{\"type\":\"pair_ok\",\"sessionToken\":" + Quote(session) + clipboardFields + "}", options.ioTimeoutMs, running);
+            return SendJson(socket, "{\"type\":\"pair_ok\",\"sessionToken\":" + Quote(session) + clipboardFields + audioFields + identityFields + "}", options.ioTimeoutMs, running);
         }
         if (session.empty() || !SecretEqual(Field(object, "sessionToken"), session)) {
             ReplyError(socket, "invalid_session"); return false;
@@ -768,7 +856,14 @@ struct LanServer::Impl {
         }
         if (type != "ping" && type != "pong") { ReplyError(socket, "unsupported_control_type"); return false; }
         lastRx = Clock::now();
-        if (type == "ping") return SendJson(socket, "{\"type\":\"pong\",\"sessionToken\":" + Quote(session) + "}", options.ioTimeoutMs, running);
+        std::string probe;
+        if (object.count("probeId")) {
+            probe = Field(object, "probeId");
+            if (!clipboard_wire::Hex(probe, 16)) { ReplyError(socket, "invalid_probe_id"); return false; }
+        }
+        if (object.size() != (probe.empty() ? 2 : 3)) { ReplyError(socket, "invalid_heartbeat"); return false; }
+        if (type == "ping") return SendJson(socket, "{\"type\":\"pong\",\"sessionToken\":" + Quote(session) +
+            (probe.empty() ? "" : ",\"probeId\":" + Quote(probe)) + "}", options.ioTimeoutMs, running);
         return true;
     }
 
@@ -790,9 +885,10 @@ struct LanServer::Impl {
         uint32_t controlPeer = 0, attachPeer = 0;
         Time acceptedAt {}, attachAt {}, lastRx {}, lastPing {};
         while (running.load()) {
-            bool requested;
-            { std::lock_guard<std::mutex> lock(mutex); requested = disconnectRequested; }
-            if (requested) { Disconnect(""); socket.reset(); attaching.reset(); controlReader = Reader(); attachReader = Reader(); }
+            bool requested, retry;
+            { std::lock_guard<std::mutex> lock(mutex); requested = disconnectRequested; retry = reconnectRequested;
+              if (reconnecting && Clock::now() >= reconnectDeadline) { AbortLocked("reconnect_grace_expired"); requested = true; retry = false; } }
+            if (requested) { Disconnect("", false, retry); socket.reset(); attaching.reset(); controlReader = Reader(); attachReader = Reader(); }
             if (!PollInput(socket)) { Disconnect("input_status_send_failed"); socket.reset(); attaching.reset(); }
             uint32_t peer = 0;
             Sock incoming = Accept(controlListener, peer, options);
@@ -818,7 +914,7 @@ struct LanServer::Impl {
                 int read = controlReader.Read(socket, options.ioTimeoutMs, message);
                 bool cleanStop = false;
                 if (read < 0 || (read == 1 && !HandleControl(socket, message, hello, lastRx, lastPing, cleanStop))) {
-                    Disconnect(read < 0 ? "control_closed_invalid_or_partial_timeout" : "", read == -2 || cleanStop);
+                    Disconnect(read < 0 ? "control_closed_invalid_or_partial_timeout" : "", read == -2 || cleanStop, read < 0);
                     socket.reset(); attaching.reset();
                 }
             }
@@ -826,18 +922,20 @@ struct LanServer::Impl {
                 bool isPaired;
                 std::string session;
                 Time pairingDeadline;
-                { std::lock_guard<std::mutex> lock(mutex); isPaired = paired; session = token; pairingDeadline = pinExpires; }
+                { std::lock_guard<std::mutex> lock(mutex); isPaired = paired; session = token;
+                  pairingDeadline = identity.Available() ? acceptedAt + std::chrono::milliseconds(options.heartbeatTimeoutMs) : pinExpires; }
                 Time now = Clock::now();
-                // Before hello: six seconds. After hello: the remaining PIN TTL,
-                // so a person has time to read and enter the on-screen PIN.
+                // Modern clients enter PIN before connecting, and remembered
+                // resume must remain available after PIN expiry. Legacy-only
+                // servers retain their human PIN-entry deadline.
                 if ((!isPaired && ((!hello && now - acceptedAt >= std::chrono::milliseconds(options.heartbeatTimeoutMs)) ||
                         (hello && now >= pairingDeadline))) ||
                     (isPaired && now - lastRx >= std::chrono::milliseconds(options.heartbeatTimeoutMs))) {
-                    Disconnect(isPaired ? "heartbeat_timeout" : "handshake_timeout"); socket.reset(); attaching.reset();
+                    Disconnect(isPaired ? "heartbeat_timeout" : "handshake_timeout", false, isPaired); socket.reset(); attaching.reset();
                 } else if (isPaired && now - lastPing >= std::chrono::milliseconds(options.heartbeatMs)) {
                     lastPing = now;
                     if (!SendJson(socket, "{\"type\":\"ping\",\"sessionToken\":" + Quote(session) + "}", options.ioTimeoutMs, running)) {
-                        Disconnect("control_send_failed_or_timed_out"); socket.reset(); attaching.reset();
+                        Disconnect("control_send_failed_or_timed_out", false, true); socket.reset(); attaching.reset();
                     }
                 }
             }
@@ -855,7 +953,18 @@ struct LanServer::Impl {
                     }
                     if (valid && SendJson(attaching, "{\"type\":\"video_ready\"}", options.ioTimeoutMs, running)) {
                         std::lock_guard<std::mutex> lock(mutex);
-                        if (running.load() && paired && !video) { video = attaching; status = "VIDEO_READY"; }
+                        if (running.load() && paired && !video) {
+                            video = attaching; status = "VIDEO_READY";
+                            if (reconnecting && Clock::now() < reconnectDeadline && modernPeer) {
+                                ClearQueueLocked(); needsConfig = latestConfig.empty();
+                                if (!latestConfig.empty()) {
+                                    Packet config; config.type = 1; config.pts = 0; config.flags = 0; config.bytes = latestConfig;
+                                    queue.push_back(std::move(config)); queuedConfigs = 1;
+                                }
+                                needsIdr = true; hasAu = false; sequence = 0; lastPts = 0;
+                                keyframeRequested = true; awaitingReconnectIdr = true; reconnecting = false; streaming = true; status = "STREAMING"; ++reconnectCount; ++streamId; cv.notify_one();
+                            }
+                        }
                     }
                     attaching.reset();
                 }
@@ -866,7 +975,7 @@ struct LanServer::Impl {
                 uint8_t byte;
                 ssize_t n = recv(attached->fd, &byte, 1, MSG_PEEK);
                 if (n == 0 || n > 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
-                    Disconnect(n > 0 ? "unexpected_video_channel_input" : "video_disconnected", n == 0);
+                    Disconnect(n > 0 ? "unexpected_video_channel_input" : "video_disconnected", n == 0, n <= 0);
                     socket.reset(); attaching.reset();
                 }
             }
@@ -901,6 +1010,12 @@ LanServer::LanServer(const LanServerTestOptions& options) : impl_(std::make_uniq
     impl_->options.heartbeatMs = options.heartbeatMs; impl_->options.heartbeatTimeoutMs = options.heartbeatTimeoutMs;
     impl_->options.ioTimeoutMs = options.ioTimeoutMs; impl_->options.pinLifetimeMs = options.pinLifetimeMs;
     impl_->options.sendBufferBytes = options.sendBufferBytes; impl_->options.allowLoopback = options.allowLoopback;
+    impl_->options.reconnectGraceMs = options.reconnectGraceMs;
+}
+void LanServer::InterruptVideoWriteForTest()
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->video) shutdown(impl_->video->fd, SHUT_WR);
 }
 #endif
 LanServer::~LanServer() { Stop(); }
@@ -927,10 +1042,14 @@ int LanServer::Start(const std::string& bindAddress)
         s.inputAccepted = s.inputRejected = s.inputReleases = 0; s.inputStatusPending = false;
         s.sentFrames = s.sentBytes = s.sentPackets = s.abortedStreams = 0; s.queueHighWater = 0;
         s.eosQueued = false; s.eosSent = false; s.encoderEndedSuccess = false; s.streamCompleted = false;
+        s.reconnecting = false; s.reconnectRequested = false; s.keyframeRequested = false; s.awaitingReconnectIdr = false; s.modernPeer = false;
+        s.challenge.clear(); s.currentPeerKey.clear(); s.capturePeerKey.clear(); s.latestConfig.clear(); s.reconnectCount = 0;
     }
     // Clipboard listener failure leaves the existing video/input service available.
     try { s.clipboardStarted = s.clipboardHooks.start && s.clipboardHooks.port && s.clipboardHooks.pair &&
         s.clipboardHooks.start(address); } catch (...) { s.clipboardStarted = false; }
+    try { s.audioStarted = s.audioHooks.start && s.audioHooks.port && s.audioHooks.pair &&
+        s.audioHooks.start(address); } catch (...) { s.audioStarted = false; }
     try {
         s.sender = std::thread([&s] { try { s.SenderLoop(); } catch (...) { s.WorkerFailed(); } });
         s.network = std::thread([&s] { try { s.NetworkLoop(); } catch (...) { s.WorkerFailed(); } });
@@ -962,6 +1081,51 @@ void LanServer::SetClipboardHooks(LanClipboardHooks hooks)
     if (!impl_->running.load()) impl_->clipboardHooks = std::move(hooks);
 }
 
+void LanServer::SetAudioHooks(LanAudioHooks hooks)
+{
+    std::lock_guard<std::mutex> lifecycle(impl_->lifecycle);
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->running.load()) impl_->audioHooks = std::move(hooks);
+}
+
+bool LanServer::ConfigurePairingStorage(const std::string& directory)
+{
+    std::lock_guard<std::mutex> lifecycle(impl_->lifecycle);
+    if (impl_->running.load()) return false;
+    return impl_->identity.Configure(directory);
+}
+
+void LanServer::SetPairingAllowed(bool allowed)
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex); impl_->pairingAllowed = allowed;
+}
+
+bool LanServer::RevokePairedDevices()
+{
+    // Stop the current session as well: a revoked device cannot retain an old
+    // authenticated socket, pending input, clipboard bind, or reconnect grace.
+    impl_->DisableInput();
+    { std::lock_guard<std::mutex> lock(impl_->mutex);
+      impl_->cancelled.store(true); impl_->reconnecting = false; impl_->challenge.clear();
+      impl_->disconnectRequested = true; impl_->pairingAllowed = false; ++impl_->pairingGeneration; }
+    return impl_->identity.RevokeAll();
+}
+
+bool LanServer::ConsumeKeyframeRequest()
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    bool requested = impl_->keyframeRequested; impl_->keyframeRequested = false; return requested;
+}
+
+bool LanServer::CanResumeCapture()
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->running.load() && impl_->paired && impl_->modernPeer && impl_->streaming &&
+        !impl_->cancelled.load() && !impl_->eosQueued && !impl_->disconnectRequested &&
+        !impl_->capturePeerKey.empty() && impl_->currentPeerKey == impl_->capturePeerKey &&
+        (!impl_->reconnecting || Clock::now() < impl_->reconnectDeadline);
+}
+
 bool LanServer::BeginStream()
 {
     auto& s = *impl_;
@@ -971,6 +1135,8 @@ bool LanServer::BeginStream()
     s.eosQueued = false; s.eosSent = false; s.ending = false; s.lastPts = 0; s.sequence = 0;
     s.encoderEndedSuccess = false; s.streamCompleted = false;
     s.eosSending = false;
+    s.latestConfig.clear(); s.reconnecting = false; s.keyframeRequested = false; s.awaitingReconnectIdr = false;
+    s.capturePeerKey = s.currentPeerKey;
     s.sentFrames = s.sentBytes = s.sentPackets = 0;
     s.streaming = true; s.cancelled.store(false); s.status = "STREAMING"; s.error.clear(); ++s.streamId;
     return true;
@@ -985,6 +1151,25 @@ bool LanServer::Publish(const uint8_t* data, size_t size, uint64_t ptsUs, bool c
         s.AbortLocked("invalid_video_packet"); return false;
     }
     if (config) {
+        try { s.latestConfig.assign(data, data + size); }
+        catch (...) { s.AbortLocked("video_allocation_failed"); return false; }
+    }
+    if (s.reconnecting || s.reconnectRequested) {
+        if (eos) { s.AbortLocked("capture_ended_during_reconnect"); return false; }
+        return true; // The authorized capture advances; disconnected data is discarded.
+    }
+    if (s.awaitingReconnectIdr && !config && !keyframe && !eos) return true;
+    if (config) {
+        // Requesting a new IDR may also emit a fresh codec header. While the
+        // resumed stream has no accepted AU, replace its unsent cached header
+        // instead of overflowing the one-CONFIG queue.
+        if (s.awaitingReconnectIdr && s.queuedConfigs) {
+            for (auto& pending : s.queue) if (pending.type == 1) {
+                try { pending.bytes = s.latestConfig; }
+                catch (...) { s.AbortLocked("video_allocation_failed"); return false; }
+                s.needsConfig = false; return true;
+            }
+        }
         if (s.queuedConfigs) { s.AbortLocked("config_queue_overflow"); return false; }
     } else {
         if (s.needsConfig || (s.needsIdr && (!keyframe || !size))) { s.AbortLocked("config_then_idr_required"); return false; }
@@ -1001,7 +1186,7 @@ bool LanServer::Publish(const uint8_t* data, size_t size, uint64_t ptsUs, bool c
     if (config) { ++s.queuedConfigs; s.needsConfig = false; s.needsIdr = true; }
     else {
         ++s.queuedAus;
-        if (size) { s.needsIdr = false; s.hasAu = true; s.lastPts = ptsUs; }
+        if (size) { s.needsIdr = false; s.awaitingReconnectIdr = false; s.hasAu = true; s.lastPts = ptsUs; }
         if (eos) s.eosQueued = true;
     }
     s.queueHighWater = std::max(s.queueHighWater, s.queue.size());
@@ -1045,6 +1230,11 @@ std::string LanServer::SnapshotJson(bool includePin)
         << ",\"encoderEndedSuccess\":" << s.encoderEndedSuccess << ",\"streamCompleted\":" << s.streamCompleted
         << ",\"inputSupported\":" << s.InputSupportedLocked() << ",\"inputEnabled\":" << s.inputEnabled
         << ",\"inputAccepted\":" << s.inputAccepted << ",\"inputRejected\":" << s.inputRejected << ",\"inputReleases\":" << s.inputReleases
+        << ",\"reconnecting\":" << s.reconnecting << ",\"reconnectCount\":" << s.reconnectCount
+        << ",\"reconnectGraceMs\":" << (s.reconnecting ? std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(s.reconnectDeadline - Clock::now()).count()) : 0)
+        << ",\"pairingAvailable\":" << s.identity.Available() << ",\"pairingAllowed\":" << s.pairingAllowed
+        << ",\"trustedDeviceCount\":" << s.identity.TrustedCount() << ",\"pairingError\":" << Quote(s.identity.Error())
+        << ",\"audioSupported\":" << s.audioStarted
         << ",\"error\":" << Quote(s.error) << "}";
     return out.str();
 }

@@ -27,7 +27,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr int WIDTH_LIMIT = 1920;
 constexpr int HEIGHT_LIMIT = 1080;
-constexpr int FPS = 30;
 constexpr int64_t BITRATE = 8000000;
 constexpr size_t QUEUE_PACKETS = 64;
 constexpr size_t QUEUE_BYTES = 16 * 1024 * 1024;
@@ -140,7 +139,9 @@ struct EncoderProbe::Impl {
         bool cbrSupported = false, vbrSupported = false;
         bool fileSaved = false, reportSaved = false;
         bool recordLocally = true;
-        int durationSeconds = 10;
+        int durationSeconds = 10, requestedFps = 30;
+        bool captureSystemAudio = false, capturePaused = false;
+        uint64_t audioBuffers = 0, audioBytes = 0, audioDroppedBuffers = 0, audioInvalidBuffers = 0;
         bool streamEnabled = false, streamCancelled = false, streamFailed = false;
         bool streamEosAccepted = false, streamFinishedCalled = false, streamFinishedSuccess = false;
         uint64_t streamAcceptedPackets = 0, streamAcceptedBytes = 0, streamRejectedPackets = 0;
@@ -172,7 +173,7 @@ struct EncoderProbe::Impl {
     size_t queuedBytes = 0;
     unsigned zeroRun = 0;
     bool expectNalHeader = false;
-    EncoderStreamHooks hooks; // Immutable during a run; callbacks are invoked only by worker.
+    EncoderStreamHooks hooks; // Immutable during a run; audioPCM alone is invoked from capture callback.
 
     bool PollStreamCancellation()
     {
@@ -431,6 +432,34 @@ struct EncoderProbe::Impl {
         data.highWaterBytes = std::max<uint64_t>(data.highWaterBytes, queuedBytes);
         wake.notify_all();
     }
+    static void OnCaptureData(OH_AVScreenCapture*, OH_AVBuffer* buffer,
+        OH_AVScreenCaptureBufferType type, int64_t timestamp, void* context) noexcept
+    {
+        if (type != OH_SCREEN_CAPTURE_BUFFERTYPE_AUDIO_INNER) return;
+        auto* self = static_cast<Impl*>(context);
+        try {
+            {
+                std::lock_guard<std::mutex> lock(self->mutex);
+                if (!self->data.captureSystemAudio || !self->data.captureStarted || self->data.capturePaused || self->data.captureStopping || self->data.cancel) return;
+                ++self->data.audioBuffers;
+            }
+            OH_AVCodecBufferAttr attr {};
+            const auto capacity = buffer ? OH_AVBuffer_GetCapacity(buffer) : 0;
+            const auto* address = buffer ? OH_AVBuffer_GetAddr(buffer) : nullptr;
+            if (!buffer || OH_AVBuffer_GetBufferAttr(buffer, &attr) != AV_ERR_OK || !address ||
+                attr.offset < 0 || attr.size <= 0 || attr.size > 192000 || attr.size % 4 != 0 ||
+                capacity <= 0 || attr.offset > capacity || attr.size > capacity - attr.offset || timestamp < 0) {
+                std::lock_guard<std::mutex> lock(self->mutex); ++self->data.audioInvalidBuffers; return;
+            }
+            bool accepted = self->hooks.audioPCM && self->hooks.audioPCM(address + attr.offset, size_t(attr.size), uint64_t(timestamp) / 1000);
+            std::lock_guard<std::mutex> lock(self->mutex);
+            if (accepted) self->data.audioBytes += uint64_t(attr.size); else ++self->data.audioDroppedBuffers;
+        } catch (...) {
+            try { std::lock_guard<std::mutex> lock(self->mutex); ++self->data.audioInvalidBuffers; } catch (...) {}
+        }
+        // Borrowed callback buffer belongs to the SDK; never release or record it.
+    }
+
     static void OnCaptureState(OH_AVScreenCapture*, OH_AVScreenCaptureStateCode code, void* context) noexcept
     {
         auto* self = static_cast<Impl*>(context);
@@ -438,6 +467,10 @@ struct EncoderProbe::Impl {
             std::lock_guard<std::mutex> lock(self->mutex);
             self->EventLocked("capture state", static_cast<int>(code));
             if (code == OH_SCREEN_CAPTURE_STATE_STARTED) self->data.captureStarted = true;
+            if (code == OH_SCREEN_CAPTURE_STATE_PAUSED_BY_USER || code == OH_SCREEN_CAPTURE_STATE_PAUSED_BY_APP)
+                self->data.capturePaused = true;
+            if (code == OH_SCREEN_CAPTURE_STATE_RESUMED_BY_USER || code == OH_SCREEN_CAPTURE_STATE_RESUMED_BY_APP)
+                self->data.capturePaused = false;
             if ((code == OH_SCREEN_CAPTURE_STATE_CANCELED || code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER ||
                 code == OH_SCREEN_CAPTURE_STATE_INTERRUPTED_BY_OTHER || code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_CALL ||
                 code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER_SWITCHES) && !self->data.captureStopping) {
@@ -541,7 +574,7 @@ struct EncoderProbe::Impl {
         if (!Checked("OH_AVCapability_IsVideoSizeSupported", OH_AVCapability_IsVideoSizeSupported(capability, width, height) ? 0 : NO_HARDWARE) ||
             !Checked("OH_AVCapability_GetVideoFrameRateRangeForSize", OH_AVCapability_GetVideoFrameRateRangeForSize(capability, width, height, &fpsRange))) return false;
         { std::lock_guard<std::mutex> lock(mutex); data.fpsRange = fpsRange; }
-        bool supported = OH_AVCapability_AreVideoSizeAndFrameRateSupported(capability, width, height, FPS);
+        bool supported = OH_AVCapability_AreVideoSizeAndFrameRateSupported(capability, width, height, data.requestedFps);
         if (!Checked("OH_AVCapability_AreVideoSizeAndFrameRateSupported", supported ? 0 : NO_HARDWARE)) return false;
         if (BITRATE < bitrateRange.minVal || BITRATE > bitrateRange.maxVal) { Fail(NO_HARDWARE, "8 Mbps outside hardware bitrate capability"); return false; }
         bool cbr = OH_AVCapability_IsEncoderBitrateModeSupported(capability, BITRATE_MODE_CBR);
@@ -566,7 +599,7 @@ struct EncoderProbe::Impl {
         if (!Checked("OH_AVFormat_SetIntValue(width)", OH_AVFormat_SetIntValue(format.get(), OH_MD_KEY_WIDTH, width) ? 0 : FAILURE) ||
             !Checked("OH_AVFormat_SetIntValue(height)", OH_AVFormat_SetIntValue(format.get(), OH_MD_KEY_HEIGHT, height) ? 0 : FAILURE) ||
             !Checked("OH_AVFormat_SetIntValue(surface)", OH_AVFormat_SetIntValue(format.get(), OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT) ? 0 : FAILURE) ||
-            !Checked("OH_AVFormat_SetDoubleValue(frame_rate)", OH_AVFormat_SetDoubleValue(format.get(), OH_MD_KEY_FRAME_RATE, FPS) ? 0 : FAILURE) ||
+            !Checked("OH_AVFormat_SetDoubleValue(frame_rate)", OH_AVFormat_SetDoubleValue(format.get(), OH_MD_KEY_FRAME_RATE, data.requestedFps) ? 0 : FAILURE) ||
             !Checked("OH_AVFormat_SetLongValue(bitrate)", OH_AVFormat_SetLongValue(format.get(), OH_MD_KEY_BITRATE, BITRATE) ? 0 : FAILURE) ||
             !Checked("OH_AVFormat_SetIntValue(bitrate_mode)", OH_AVFormat_SetIntValue(format.get(), OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, mode) ? 0 : FAILURE) ||
             !Checked("OH_AVFormat_SetIntValue(i_frame_interval)", OH_AVFormat_SetIntValue(format.get(), OH_MD_KEY_I_FRAME_INTERVAL, 1000) ? 0 : FAILURE)) return false;
@@ -594,7 +627,14 @@ struct EncoderProbe::Impl {
         config.videoInfo.videoCapInfo.videoFrameWidth = width;
         config.videoInfo.videoCapInfo.videoFrameHeight = height;
         config.videoInfo.videoCapInfo.videoSource = OH_VIDEO_SOURCE_SURFACE_RGBA;
-        // Zero sample rates/channels disable both audio sources. No raw video callback is registered.
+        // Only system playback is opted in. A zero microphone format plus explicit disable
+        // prevents microphone capture. Surface video still flows directly to the encoder.
+        if (data.captureSystemAudio) {
+            config.audioInfo.innerCapInfo.audioSampleRate = 48000;
+            config.audioInfo.innerCapInfo.audioChannels = 2;
+            config.audioInfo.innerCapInfo.audioSource = OH_ALL_PLAYBACK;
+            if (!Checked("OH_AVScreenCapture_SetDataCallback", OH_AVScreenCapture_SetDataCallback(r.capture, OnCaptureData, this))) return false;
+        }
         if (!Checked("OH_AVScreenCapture_Init", OH_AVScreenCapture_Init(r.capture, config)) ||
             !Checked("OH_AVScreenCapture_SetMicrophoneEnabled", OH_AVScreenCapture_SetMicrophoneEnabled(r.capture, false)) ||
             !Checked("OH_AVScreenCapture_ShowCursor", OH_AVScreenCapture_ShowCursor(r.capture, true))) return false;
@@ -683,6 +723,11 @@ struct EncoderProbe::Impl {
         out.imbue(std::locale::classic());
         out << std::fixed << std::setprecision(3) << "{\"schemaVersion\":2,\"probe\":\"harmony-h264-phase0c\",\"status\":"
             << Quote(data.status) << ",\"running\":" << (data.running ? "true" : "false")
+            << ",\"requestedFps\":" << data.requestedFps
+            << ",\"systemAudio\":{\"enabled\":" << (data.captureSystemAudio ? "true" : "false")
+            << ",\"paused\":" << (data.capturePaused ? "true" : "false")
+            << ",\"buffers\":" << data.audioBuffers << ",\"bytes\":" << data.audioBytes
+            << ",\"droppedBuffers\":" << data.audioDroppedBuffers << ",\"invalidBuffers\":" << data.audioInvalidBuffers << ",\"microphone\":false}"
             << ",\"frames\":" << data.frames << ",\"elapsedSeconds\":" << elapsed << ",\"averageFps\":" << fps
             << ",\"bytes\":" << data.bytes << ",\"bytesReceived\":" << data.bytesReceived
             << ",\"stream\":{\"enabled\":" << (data.streamEnabled ? "true" : "false")
@@ -717,8 +762,9 @@ struct EncoderProbe::Impl {
             << ",\"display\":{\"id\":" << Quote(std::to_string(data.displayId)) << ",\"width\":" << data.displayWidth
             << ",\"height\":" << data.displayHeight << ",\"selectedId\":" << (data.selectedKnown ? Quote(std::to_string(data.selectedId)) : "null") << '}'
             << ",\"requested\":{\"width\":" << data.width << ",\"height\":" << data.height
-            << ",\"fps\":30,\"bitrate\":8000000,\"iFrameIntervalMs\":1000,\"durationSeconds\":" << data.durationSeconds
-            << ",\"durationLimitEnabled\":" << (data.durationSeconds > 0 ? "true" : "false") << ",\"audio\":false,\"cursor\":true,\"pixelFormat\":4}"
+            << ",\"fps\":" << data.requestedFps << ",\"bitrate\":" << BITRATE << ",\"iFrameIntervalMs\":1000,\"durationSeconds\":" << data.durationSeconds
+            << ",\"durationLimitEnabled\":" << (data.durationSeconds > 0 ? "true" : "false")
+            << ",\"audio\":" << (data.captureSystemAudio ? "true" : "false") << ",\"microphone\":false,\"cursor\":true,\"pixelFormat\":4}"
             << ",\"hardware\":{\"verified\":" << (data.hardware ? "true" : "false") << ",\"codecName\":" << Quote(data.codecName)
             << ",\"selection\":\"GetCapabilityByCategory(HARDWARE), IsHardware, CreateByName\",\"bitrateMode\":" << data.bitrateMode
             << ",\"cbrSupported\":" << (data.cbrSupported ? "true" : "false") << ",\"vbrSupported\":" << (data.vbrSupported ? "true" : "false")
@@ -791,6 +837,11 @@ struct EncoderProbe::Impl {
                     auto nextReport = Clock::now();
                     for (;;) {
                         if (PollStreamCancellation()) break;
+                        if (hooks.requestKeyframe && hooks.requestKeyframe()) {
+                            FormatPtr keyframe(OH_AVFormat_Create());
+                            if (keyframe && OH_AVFormat_SetIntValue(keyframe.get(), OH_MD_KEY_REQUEST_I_FRAME, 1))
+                                Record("OH_VideoEncoder_SetParameter(request_i_frame)", OH_VideoEncoder_SetParameter(r.encoder, keyframe.get()));
+                        }
                         bool setRate = false;
                         {
                             std::lock_guard<std::mutex> lock(mutex);
@@ -807,7 +858,7 @@ struct EncoderProbe::Impl {
                         }
                         if (setRate) {
                             rateSet = true;
-                            if (!Checked("OH_AVScreenCapture_SetMaxVideoFrameRate", OH_AVScreenCapture_SetMaxVideoFrameRate(r.capture, FPS))) break;
+                            if (!Checked("OH_AVScreenCapture_SetMaxVideoFrameRate", OH_AVScreenCapture_SetMaxVideoFrameRate(r.capture, data.requestedFps))) break;
                         }
                         Drain(output);
                         if (Clock::now() >= nextReport) { Report(); nextReport = Clock::now() + std::chrono::seconds(1); }
@@ -873,8 +924,10 @@ int EncoderProbe::Start(const std::string& filesDir, EncoderStreamHooks hooks, E
 {
     struct stat info {};
     const bool hasPacketSink = static_cast<bool>(hooks.packet);
-    const bool hasAnyStreamHook = hasPacketSink || hooks.cancelled || hooks.finished;
-    if (!encoder_session::ValidOptions(options.durationSeconds, options.recordLocally, hasPacketSink, hasAnyStreamHook)) {
+    const bool hasAnyStreamHook = hasPacketSink || hooks.cancelled || hooks.finished || hooks.audioPCM || hooks.requestKeyframe;
+    if ((options.frameRate != 30 && options.frameRate != 60) ||
+        (options.captureSystemAudio && (!hasPacketSink || !hooks.audioPCM || options.recordLocally)) ||
+        !encoder_session::ValidOptions(options.durationSeconds, options.recordLocally, hasPacketSink, hasAnyStreamHook)) {
         RejectStreamStart(hooks); return -1;
     }
     if (filesDir.empty() || filesDir[0] != '/' || filesDir.find('\0') != std::string::npos ||
@@ -890,6 +943,8 @@ int EncoderProbe::Start(const std::string& filesDir, EncoderStreamHooks hooks, E
         p.data = {};
         p.data.durationSeconds = options.durationSeconds;
         p.data.recordLocally = options.recordLocally;
+        p.data.requestedFps = options.frameRate;
+        p.data.captureSystemAudio = options.captureSystemAudio;
         p.hooks = std::move(hooks);
         p.data.streamEnabled = static_cast<bool>(p.hooks.packet);
         p.packets.clear(); p.queuedBytes = 0; p.zeroRun = 0; p.expectNalHeader = false;
@@ -933,5 +988,11 @@ void EncoderProbe::Stop()
     if (p.worker.joinable()) p.worker.join();
 }
 bool EncoderProbe::IsRunning() { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->data.running; }
+bool EncoderProbe::IsSystemAudioRunning()
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->data.running && impl_->data.captureStarted && impl_->data.captureSystemAudio &&
+        !impl_->data.cancel && !impl_->data.captureStopping;
+}
 std::string EncoderProbe::SnapshotJson() { return impl_->Json(); }
 EncoderProbe& GetEncoderProbe() { static EncoderProbe probe; return probe; }

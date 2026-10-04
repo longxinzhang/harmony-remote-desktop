@@ -1,4 +1,5 @@
 #include "lan_server.h"
+#include "pairing_identity.h"
 #include <atomic>
 #include <mutex>
 
@@ -6,6 +7,8 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <fstream>
 
 #include <array>
 #include <chrono>
@@ -170,8 +173,9 @@ LanServerTestOptions Defaults()
 }
 
 struct Fixture {
-    explicit Fixture(const LanServerTestOptions& o = Defaults()) : server(o)
+    explicit Fixture(const LanServerTestOptions& o = Defaults(), const std::string& directory = "") : server(o)
     {
+        if (!directory.empty()) CHECK(server.ConfigurePairingStorage(directory));
         CHECK(server.Start("127.0.0.1") == 0);
         auto snapshot = server.SnapshotJson(true);
         cp = static_cast<uint16_t>(Number(snapshot, "controlPort"));
@@ -183,6 +187,50 @@ struct Fixture {
     std::string pin;
 };
 
+struct Client {
+    Fd control, video;
+    std::string token;
+};
+
+struct TemporaryDirectory {
+    std::string path;
+    TemporaryDirectory() {
+        std::string pattern = "/tmp/hrd-pairing-test-XXXXXX";
+        std::vector<char> name(pattern.begin(), pattern.end()); name.push_back(0);
+        char* result = mkdtemp(name.data()); CHECK(result); path = result;
+    }
+    ~TemporaryDirectory() { unlink((path + "/trusted-peers-v1").c_str()); rmdir(path.c_str()); }
+};
+
+std::string ModernHello(const Fd& socket)
+{
+    Json(socket, "{\"type\":\"hello\",\"protocol\":1,\"client\":\"macOS\"}");
+    auto hello = ReadJson(socket);
+    CHECK(String(hello, "pairingScheme") == "p256-sha256-v1");
+    CHECK(PairingIdentity::Verify(String(hello, "hostPublicKey"), "HRDHELLO1\n" + String(hello, "challenge") + "\n" +
+        String(hello, "hostPublicKey"), String(hello, "hostHelloSignature")));
+    return hello;
+}
+
+std::string PairProof(const std::string& hello, PairingIdentity& identity, bool resume, bool remember, const std::string& pin)
+{
+    const std::string clientChallenge(64, 'c');
+    const auto transcript = PairingIdentity::Transcript(String(hello, "challenge"), clientChallenge, String(hello, "hostPublicKey"), identity.PublicKey(), resume, remember);
+    return "{\"type\":\"" + std::string(resume ? "pair_resume" : "pair") + "\",\"clientPublicKey\":\"" + identity.PublicKey() +
+        "\",\"clientChallenge\":\"" + clientChallenge + "\",\"remember\":" + (remember ? "true" : "false") +
+        ",\"clientSignature\":\"" + identity.Sign(transcript) + "\"" + (resume ? "" : ",\"pin\":\"" + pin + "\"") + "}";
+}
+
+Client PairModern(Fixture& fixture, PairingIdentity& identity, bool resume = false, bool remember = false)
+{
+    Client client; client.control = Connect(fixture.cp); const auto hello = ModernHello(client.control);
+    Json(client.control, PairProof(hello, identity, resume, remember, fixture.pin));
+    const auto result = ReadJson(client.control); CHECK(String(result, "type") == "pair_ok"); client.token = String(result, "sessionToken");
+    const auto transcript = PairingIdentity::Transcript(String(hello, "challenge"), std::string(64, 'c'), String(hello, "hostPublicKey"), identity.PublicKey(), resume, remember);
+    CHECK(PairingIdentity::Verify(String(hello, "hostPublicKey"), transcript + "\nhost\n" + client.token, String(result, "hostSignature")));
+    CHECK(True(result, "remembered") == remember); return client;
+}
+
 void Hello(const Fd& control, bool fragment = false)
 {
     Json(control, "{\"type\":\"hello\",\"protocol\":1,\"client\":\"macOS\"}", fragment);
@@ -191,11 +239,6 @@ void Hello(const Fd& control, bool fragment = false)
     CHECK(String(reply, "timestampSource") == "encoder_callback_monotonic");
     CHECK(reply.find("\"nativePtsUnitVerified\":false") != std::string::npos);
 }
-
-struct Client {
-    Fd control, video;
-    std::string token;
-};
 
 Client Pair(Fixture& f, bool fragment = false)
 {
@@ -325,6 +368,42 @@ int ServeFixture()
     CHECK(Number(f.server.SnapshotJson(), "sentFrames") == 2);
     return 0;
 }
+
+int ServePairingFixture(bool reconnect)
+{
+    const auto waitStage = [](const std::function<bool()>& condition, int timeout, const char* stage) {
+        try { Wait(condition, timeout); }
+        catch (...) { throw std::runtime_error(std::string("pairing fixture timeout: ") + stage); }
+    };
+    TemporaryDirectory directory; auto options = Defaults(); options.heartbeatMs = 1000; options.heartbeatTimeoutMs = 10000;
+    Fixture fixture(options, directory.path); fixture.server.SetPairingAllowed(true);
+    std::cout << "{\"controlPort\":" << fixture.cp << ",\"videoPort\":" << fixture.vp << ",\"pin\":\"" << fixture.pin << "\"}" << std::endl;
+    waitStage([&] { return True(fixture.server.SnapshotJson(), "paired"); }, 15000, "first pairing");
+    if (reconnect) {
+        waitStage([&] { return True(fixture.server.SnapshotJson(), "videoReady"); }, 5000, "first video attach");
+        CHECK(fixture.server.BeginStream());
+        CHECK(fixture.server.Publish(CONFIG.data(), CONFIG.size(), 0, true, false, false));
+        CHECK(fixture.server.Publish(IDR.data(), IDR.size(), 0, false, true, false));
+        waitStage([&] { return Number(fixture.server.SnapshotJson(), "sentFrames") == 1; }, 5000, "first IDR");
+        std::this_thread::sleep_for(2500ms);
+        fixture.server.InterruptVideoWriteForTest();
+        waitStage([&] { return True(fixture.server.SnapshotJson(), "reconnecting"); }, 5000, "capture reconnect grace");
+        CHECK(!fixture.server.IsStreamCancelled());
+        std::cout << "{\"readyForReconnect\":true}" << std::endl;
+        waitStage([&] { return Number(fixture.server.SnapshotJson(), "reconnectCount") == 1; }, 5000, "second pairing and video attach");
+        CHECK(fixture.server.ConsumeKeyframeRequest());
+        CHECK(fixture.server.Publish(IDR.data(), IDR.size(), 100000, false, true, false));
+        waitStage([&] { return Number(fixture.server.SnapshotJson(), "sentFrames") == 2; }, 5000, "second IDR");
+        CHECK(fixture.server.Publish(nullptr, 0, 100000, false, false, true)); fixture.server.EndStream(true);
+    }
+    waitStage([&] { return !True(fixture.server.SnapshotJson(), "paired"); }, 15000, "client clean disconnect");
+    if (reconnect) {
+        CHECK(True(fixture.server.SnapshotJson(), "streamCompleted"));
+        CHECK(Number(fixture.server.SnapshotJson(), "trustedDeviceCount") == 1);
+        std::cout << "{\"reconnected\":true,\"trustedDeviceCount\":1,\"inputEnabled\":false}" << std::endl;
+    }
+    fixture.server.Stop(); return 0;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -333,8 +412,149 @@ int main(int argc, char** argv)
         if (argc == 2 && std::string(argv[1]) == "--serve-fixture") return ServeFixture();
         if (argc == 2 && std::string(argv[1]) == "--serve-input-fixture") return ServeInputFixture(false);
         if (argc == 2 && std::string(argv[1]) == "--serve-input-overflow-fixture") return ServeInputFixture(true);
+        if (argc == 2 && std::string(argv[1]) == "--serve-pairing") return ServePairingFixture(false);
+        if (argc == 2 && std::string(argv[1]) == "--serve-pairing-reconnect") return ServePairingFixture(true);
+        if (argc == 3 && std::string(argv[1]) == "--sign-proof") {
+            TemporaryDirectory directory; PairingIdentity identity; CHECK(identity.Configure(directory.path));
+            std::cout << identity.PublicKey() << '\n' << identity.Sign(argv[2]) << '\n'; return 0;
+        }
+        if (argc == 5 && std::string(argv[1]) == "--verify-proof") return PairingIdentity::Verify(argv[2], argv[3], argv[4]) ? 0 : 2;
         unsigned int count = 0;
         auto test = [&](const char* name, const std::function<void()>& body) { body(); ++count; std::cout << "PASS " << name << '\n'; };
+
+        test("signed challenge verifies fresh nonces host identity and session token", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto socket = Connect(fixture.cp); auto hello = ModernHello(socket);
+            auto request = PairProof(hello, client, false, false, fixture.pin); Json(socket, request); auto result = ReadJson(socket);
+            CHECK(String(result, "type") == "pair_ok");
+            auto transcript = PairingIdentity::Transcript(String(hello, "challenge"), std::string(64, 'c'), String(hello, "hostPublicKey"), client.PublicKey(), false, false);
+            const auto proof = String(result, "hostSignature"), token = String(result, "sessionToken");
+            CHECK(PairingIdentity::Verify(String(hello, "hostPublicKey"), transcript + "\nhost\n" + token, proof));
+            CHECK(!PairingIdentity::Verify(String(hello, "hostPublicKey"), transcript + "\nhost\n" + std::string(64, 'a'), proof));
+            transcript.replace(transcript.find(std::string(64, 'c')), 64, std::string(64, 'd'));
+            CHECK(!PairingIdentity::Verify(String(hello, "hostPublicKey"), transcript + "\nhost\n" + token, proof));
+        });
+        test("recorded client proof cannot replay against another server challenge", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto first = Connect(fixture.cp); auto hello = ModernHello(first);
+            auto request = PairProof(hello, client, false, false, fixture.pin); first.Close();
+            Wait([&] { return String(fixture.server.SnapshotJson(), "status") == "LISTENING"; });
+            auto next = Connect(fixture.cp); auto fresh = ModernHello(next); CHECK(String(hello, "challenge") != String(fresh, "challenge"));
+            Json(next, request); CHECK(String(ReadJson(next), "error") == "invalid_pairing_proof"); CHECK(Closed(next));
+        });
+        test("persistent enrollment requires explicit host opt-in", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto socket = Connect(fixture.cp); auto hello = ModernHello(socket); CHECK(!True(hello, "rememberAllowed"));
+            Json(socket, PairProof(hello, client, false, true, fixture.pin)); CHECK(String(ReadJson(socket), "error") == "persistent_pairing_not_allowed");
+            CHECK(Closed(socket)); CHECK(Number(fixture.server.SnapshotJson(), "trustedDeviceCount") == 0);
+        });
+        test("ephemeral peer resumes without PIN using fresh session token but not after service restart", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto first = PairModern(fixture, client); auto oldToken = first.token;
+            first.control.Close(); Wait([&] { return !True(fixture.server.SnapshotJson(), "paired"); });
+            auto next = PairModern(fixture, client, true); CHECK(next.token != oldToken); CHECK(Number(fixture.server.SnapshotJson(), "trustedDeviceCount") == 0);
+            fixture.server.Stop(); CHECK(fixture.server.Start("127.0.0.1") == 0); fixture.cp = Number(fixture.server.SnapshotJson(), "controlPort");
+            auto socket = Connect(fixture.cp); auto hello = ModernHello(socket); Json(socket, PairProof(hello, client, true, false, ""));
+            CHECK(String(ReadJson(socket), "error") == "pairing_not_trusted");
+        });
+        test("remembered public peer reloads from signed private app store and revokes", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            { Fixture fixture(Defaults(), hostDirectory.path); fixture.server.SetPairingAllowed(true); auto first = PairModern(fixture, client, false, true);
+              CHECK(Number(fixture.server.SnapshotJson(), "trustedDeviceCount") == 1); }
+            struct stat info {}; CHECK(stat((hostDirectory.path + "/trusted-peers-v1").c_str(), &info) == 0 && (info.st_mode & 0777) == 0600);
+            Fixture restored(Defaults(), hostDirectory.path); auto next = PairModern(restored, client, true, true);
+            CHECK(restored.server.RevokePairedDevices()); CHECK(Closed(next.control)); CHECK(Number(restored.server.SnapshotJson(), "trustedDeviceCount") == 0);
+            auto socket = Connect(restored.cp); auto hello = ModernHello(socket); Json(socket, PairProof(hello, client, true, true, ""));
+            CHECK(String(ReadJson(socket), "error") == "pairing_not_trusted");
+            PairingIdentity reload; CHECK(reload.Configure(hostDirectory.path)); CHECK(reload.TrustedCount() == 0);
+        });
+        test("remembered resume is independent of the current PIN expiration", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            auto options = Defaults(); options.pinLifetimeMs = 300; Fixture fixture(options, hostDirectory.path); fixture.server.SetPairingAllowed(true);
+            auto first = PairModern(fixture, client, false, true); first.control.Close(); Wait([&] { return !True(fixture.server.SnapshotJson(), "paired"); });
+            std::this_thread::sleep_for(350ms); CHECK(!True(fixture.server.SnapshotJson(true), "pinValid"));
+            auto resumed = PairModern(fixture, client, true, true); CHECK(!resumed.token.empty());
+        });
+        test("signed trust store rejects modification and unsafe filesystem permissions", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client, identity;
+            CHECK(client.Configure(clientDirectory.path) && identity.Configure(hostDirectory.path)); CHECK(identity.Enroll(client.PublicKey(), true));
+            const auto file = hostDirectory.path + "/trusted-peers-v1";
+            { std::fstream stream(file, std::ios::in | std::ios::out); stream.seekp(0); stream.put('X'); }
+            PairingIdentity modified; CHECK(!modified.Configure(hostDirectory.path)); CHECK(modified.TrustedCount() == 0);
+            CHECK(identity.RevokeAll()); CHECK(chmod(file.c_str(), 0644) == 0);
+            PairingIdentity readable; CHECK(!readable.Configure(hostDirectory.path)); CHECK(readable.TrustedCount() == 0);
+        });
+        test("unexpected disconnect retains authorized capture for same peer and requires fresh config plus IDR", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity identity; CHECK(identity.Configure(clientDirectory.path));
+            InputMock input; Fixture fixture(Defaults(), hostDirectory.path); fixture.server.SetInputHooks(input.Hooks());
+            auto first = PairModern(fixture, identity); Attach(fixture, first); ConfigAndIdr(fixture, first); Enable(first);
+            first.control.Close(); Wait([&] { return True(fixture.server.SnapshotJson(), "reconnecting"); });
+            CHECK(!fixture.server.IsStreamCancelled() && !input.enabled.load()); CHECK(fixture.server.Publish(PFRAME.data(), PFRAME.size(), 40, false, false, false));
+            CHECK(Number(fixture.server.SnapshotJson(), "queuedAccessUnits") == 0);
+            auto next = PairModern(fixture, identity, true); Attach(fixture, next); auto config = Video(next.video); CHECK(config.type == 1 && config.seq == 0 && config.body == CONFIG);
+            CHECK(fixture.server.ConsumeKeyframeRequest()); CHECK(!fixture.server.ConsumeKeyframeRequest());
+            CHECK(fixture.server.Publish(PFRAME.data(), PFRAME.size(), 50, false, false, false)); CHECK(Number(fixture.server.SnapshotJson(), "queuedAccessUnits") == 0);
+            CHECK(fixture.server.Publish(IDR.data(), IDR.size(), 60, false, true, false)); auto idr = Video(next.video); CHECK(idr.seq == 1 && idr.flags == 1);
+            CHECK(!input.enabled.load()); CHECK(Number(fixture.server.SnapshotJson(), "reconnectCount") == 1);
+        });
+        test("reconnect grace expires and explicit stop never keeps capture alive", [] {
+            for (bool explicitStop : {false, true}) {
+                TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity identity; CHECK(identity.Configure(clientDirectory.path));
+                auto options = Defaults(); options.reconnectGraceMs = 80; Fixture fixture(options, hostDirectory.path);
+                auto first = PairModern(fixture, identity); Attach(fixture, first); ConfigAndIdr(fixture, first);
+                if (explicitStop) Json(first.control, Auth(first, "stop")); else first.control.Close();
+                Wait([&] { return fixture.server.IsStreamCancelled(); }, 1000); CHECK(!True(fixture.server.SnapshotJson(), "reconnecting"));
+            }
+        });
+        test("reconnect during initial capture consent can accept the first new CONFIG and IDR", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto first = PairModern(fixture, client); Attach(fixture, first);
+            CHECK(fixture.server.BeginStream()); first.control.Close(); Wait([&] { return True(fixture.server.SnapshotJson(), "reconnecting"); });
+            auto resumed = PairModern(fixture, client, true); Attach(fixture, resumed); CHECK(!True(fixture.server.SnapshotJson(), "reconnecting"));
+            CHECK(fixture.server.Publish(CONFIG.data(), CONFIG.size(), 0, true, false, false)); CHECK(Video(resumed.video).type == 1);
+            CHECK(fixture.server.Publish(IDR.data(), IDR.size(), 0, false, true, false)); CHECK(Video(resumed.video).flags == 1);
+        });
+        test("fresh encoder headers replace unsent reconnect CONFIG without growing its queue", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto first = PairModern(fixture, client); Attach(fixture, first); ConfigAndIdr(fixture, first);
+            first.control.Close(); Wait([&] { return True(fixture.server.SnapshotJson(), "reconnecting"); });
+            auto resumed = PairModern(fixture, client, true); Attach(fixture, resumed);
+            for (int i = 0; i < 100; ++i) CHECK(fixture.server.Publish(CONFIG.data(), CONFIG.size(), 0, true, false, false));
+            CHECK(Number(fixture.server.SnapshotJson(), "queuedConfigs") <= 1);
+            CHECK(fixture.server.Publish(IDR.data(), IDR.size(), 100, false, true, false));
+            VideoPacket received = Video(resumed.video); CHECK(received.type == 1 && received.seq == 0);
+            do { received = Video(resumed.video); } while (received.type == 1);
+            CHECK(received.type == 2 && received.flags == 1 && received.pts == 100);
+        });
+        test("local revoke cancels reconnect capture grace immediately", [] {
+            TemporaryDirectory hostDirectory, clientDirectory; PairingIdentity client; CHECK(client.Configure(clientDirectory.path));
+            Fixture fixture(Defaults(), hostDirectory.path); auto first = PairModern(fixture, client); Attach(fixture, first); ConfigAndIdr(fixture, first);
+            first.control.Close(); Wait([&] { return True(fixture.server.SnapshotJson(), "reconnecting"); }); CHECK(fixture.server.RevokePairedDevices());
+            CHECK(fixture.server.IsStreamCancelled()); CHECK(!True(fixture.server.SnapshotJson(), "reconnecting"));
+        });
+        test("a different PIN-paired peer cannot inherit authorized reconnect capture", [] {
+            TemporaryDirectory hostDirectory, firstDirectory, nextDirectory; PairingIdentity original, other;
+            CHECK(original.Configure(firstDirectory.path) && other.Configure(nextDirectory.path)); Fixture fixture(Defaults(), hostDirectory.path);
+            auto first = PairModern(fixture, original); Attach(fixture, first); ConfigAndIdr(fixture, first); first.control.Close();
+            Wait([&] { return True(fixture.server.SnapshotJson(), "reconnecting"); }); fixture.pin = String(fixture.server.SnapshotJson(true), "pin");
+            auto next = PairModern(fixture, other); CHECK(fixture.server.IsStreamCancelled()); CHECK(!True(fixture.server.SnapshotJson(), "streaming"));
+        });
+        test("RTT echoes bounded probe ID and audio credentials are scoped to paired session", [] {
+            Fixture fixture; fixture.server.Stop(); unsigned pairCount = 0, disconnectCount = 0;
+            LanAudioHooks hooks; hooks.start = [](const auto&) { return true; }; hooks.stop = [] {}; hooks.port = [] { return uint16_t(39874); };
+            hooks.pair = [&](std::string& epoch, std::string& token) { epoch = std::string(32, 'a' + pairCount); token = std::string(64, 'b' + pairCount); ++pairCount; return true; };
+            hooks.disconnect = [&] { ++disconnectCount; }; fixture.server.SetAudioHooks(hooks); CHECK(fixture.server.Start("127.0.0.1") == 0);
+            auto state = fixture.server.SnapshotJson(true); fixture.cp = Number(state, "controlPort"); fixture.pin = String(state, "pin");
+            auto socket = Connect(fixture.cp); Json(socket, "{\"type\":\"hello\",\"protocol\":1}"); auto hello = ReadJson(socket);
+            CHECK(True(hello, "audioSupported") && True(hello, "rttSupported") && Number(hello, "audioPort") == 39874);
+            Json(socket, "{\"type\":\"pair\",\"pin\":\"" + fixture.pin + "\"}"); auto result = ReadJson(socket);
+            CHECK(String(result, "audioBindToken").size() == 64 && String(result, "audioEpoch").size() == 32);
+            Client client; client.control = std::move(socket); client.token = String(result, "sessionToken");
+            Json(client.control, Input(client, "ping", ",\"probeId\":\"0123456789abcdef\"")); auto pong = ReadJson(client.control);
+            CHECK(String(pong, "probeId") == "0123456789abcdef" && String(pong, "sessionToken") == client.token);
+            Json(client.control, Input(client, "ping", ",\"probeId\":\"bad\"")); CHECK(String(ReadJson(client.control), "error") == "invalid_probe_id"); CHECK(Closed(client.control));
+            CHECK(pairCount == 1 && disconnectCount > 0);
+        });
 
         test("clipboard optional handshake and paste auth gating bounded operation dedup", [] {
             InputMock input; Fixture f; f.server.Stop(); f.server.SetInputHooks(input.Hooks());
@@ -495,13 +715,16 @@ int main(int argc, char** argv)
             auto c = Connect(f.cp); Hello(c); Json(c, "{\"type\":\"pair\",\"pin\":\"" + f.pin + "\"}");
             CHECK(String(ReadJson(c), "error") == "pin_unavailable_restart_server");
         });
-        test("PIN expiration and consumed PIN never reused", [] {
+        test("PIN expiration and disconnected session gets a fresh PIN", [] {
             auto o = Defaults(); o.pinLifetimeMs = 60; Fixture expired(o);
             std::this_thread::sleep_for(80ms); CHECK(!True(expired.server.SnapshotJson(true), "pinValid"));
             Fixture f; auto first = Pair(f); Json(first.control, Auth(first, "stop")); CHECK(Closed(first.control));
             Wait([&] { return !True(f.server.SnapshotJson(), "paired"); });
+            CHECK(True(f.server.SnapshotJson(true), "pinValid"));
+            const auto replacement = String(f.server.SnapshotJson(true), "pin"); CHECK(replacement != f.pin);
             auto next = Connect(f.cp); Hello(next); Json(next, "{\"type\":\"pair\",\"pin\":\"" + f.pin + "\"}");
-            CHECK(String(ReadJson(next), "error") == "pin_unavailable_restart_server");
+            CHECK(String(ReadJson(next), "error") == "invalid_pin"); CHECK(Closed(next));
+            f.pin = replacement; auto repaired = Pair(f); CHECK(!repaired.token.empty());
         });
         test("missing/wrong token and all input controls denied", [] {
             for (const std::string& type : {"missing", "wrong", "input", "mouse_move", "key_event"}) {

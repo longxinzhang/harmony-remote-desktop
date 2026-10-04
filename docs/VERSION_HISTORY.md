@@ -2,6 +2,25 @@
 
 The intended repository name is `harmony-remote-desktop`. This document separates preserved source from build and device evidence. A binary archive or a list of hashes cannot reconstruct missing source.
 
+## 0.6.0-rc.1 development candidate
+
+The current candidate label is `v0.6.0-rc.1`, product version 0.6.0, Host build `1000011` and Mac build `8`. It adds six capabilities on top of the preserved 0.5.0 UI and clipboard repair:
+
+- Automatic reconnect for authenticated peers with bounded backoff and a cancellable wait; the Host keeps an existing authorized capture for the same identity for at most 60 seconds. Input and pending paste operations are released, not replayed.
+- Persistent P-256 identities, independent fresh challenges from both peers, explicit enrollment/removal, the Mac login Keychain and Host HUKS with a signed public-key allowlist.
+- Explicit Mac launch-at-login registration and actual OS status. HarmonyOS API 26 exposes startup status queries only; starting the LAN listener when the app opens is a separate opt-in preference, not a system boot registration.
+- Host 30/60 FPS options with capability checks, applied to the next sharing session after the current one stops; actual 60 FPS performance remains device-dependent.
+- Optional one-way Harmony-to-Mac system playback audio, a separate bounded transport, mute support, no microphone capture and no saved audio files.
+- Network type, matched-probe RTT/jitter, video throughput and received FPS. RTT is not a measurement of end-to-end input-to-display latency.
+
+The transport remains unencrypted LAN TCP. First PIN enrollment uses trust on first use on a trusted LAN; remembered identity validation is not TLS or payload encryption. System screen-sharing, input and clipboard authorization remains local to the Host and is not bypassed by persistence or reconnect.
+
+Both full app builds initially passed; the final Host build also passed. Final Mac source-to-binary verification, archive/publication and installation evidence are recorded separately. At this documentation update, the Mac is locked and the HDC connection failed: no new 0.6.0 install, visual acceptance, real reboot/login test, HUKS execution or live audio/FPS/reconnect result is claimed. Do not treat the candidate label here as proof that its Git tag has already been pushed.
+
+Available automated evidence includes 52 Mac clipboard, 21 presentation, 21 input, 107 network, 89 session/identity, 16 startup, 24 native audio, 24 Mac audio, five C++/CryptoKit signature interoperability checks, and three actual Mac/C++ modern pairing/reconnect scenarios. Host native LAN final results are kept in [SESSION_RELIABILITY.md](SESSION_RELIABILITY.md). These suites use ephemeral test identities and synthetic media where stated; they do not replace the Notes clipboard retest, full remote-input matrix, sustained resource checks, 60 FPS hardware acceptance, real sound output, or actual OS startup validation.
+
+See [session reliability](SESSION_RELIABILITY.md), [audio and FPS](MEDIA_AUDIO_FPS.md), [startup](STARTUP.md), and [UI/version boundaries](UI_WORKSPACE.md). Earlier commits and tags remain unchanged; formal `v0.5.0` and `v0.6.0` acceptance is not inferred from this candidate.
+
 ## Verified source inventory
 
 | Version | Available matching files / recorded hashes | Source status |
@@ -43,7 +62,7 @@ The first local commit, `5498daa`, imports the isolated pre-clipboard baseline, 
 
 The earlier repaired candidate is product version 0.5.0, Host build `1000009` and Mac build `6`, with source tag `v0.5.0-rc.1`. Its 117 local checks comprise 31 Native clipboard, 52 Mac clipboard, 21 Mac input and 13 Mac presentation checks. They are development evidence, not a successful Notes retest. That candidate's build, test and deployment boundaries remain in `CLIPBOARD_TEST_RESULTS.md`.
 
-The current UI candidate remains product version 0.5.0, Host build `1000010` and Mac build `7`, with source tag `v0.5.0-rc.2`. Both native apps now use three sidebar pages: `远程桌面` (Remote desktop), `设置` (Settings), and `开发测试` (Development tests). Host service and sharing controls are labelled `开启服务`, `下线并断开连接`, and `开始共享屏幕`; Mac connects through `连接设备`. Development tools are available through their own page in either session mode. Navigation does not change the selected debug/permanent mode, reconnect the session, or start tests. Mac pauses hidden-view presentation and releases remote input; Host cancels pending delayed test actions and hides its test animation when leaving the development page. See `UI_WORKSPACE.md` for exact behavior and separately recorded UI verification.
+The earlier UI candidate remains product version 0.5.0, Host build `1000010` and Mac build `7`, with source tag `v0.5.0-rc.2`. It introduced three sidebar pages: `远程桌面` (Remote desktop), `设置` (Settings), and `开发测试` (Development tests). Host service and sharing controls are labelled `开启服务`, `下线并断开连接`, and `开始共享屏幕`; Mac connects through `连接设备`. Development tools are available through their own page in either session mode. Navigation does not change the selected debug/permanent mode, reconnect the session, or start tests. Mac pauses hidden-view presentation and releases remote input; Host cancels pending delayed test actions and hides its test animation when leaving the development page. See `UI_WORKSPACE.md` for exact behavior and separately recorded UI verification.
 
 The UI candidate inherits the clipboard repair but does not close the Notes, full input, or long-running resource acceptance gates. Formal `v0.5.0` remains reserved. This preserves the baseline, known-defective preview, repair candidate and interface revision without inventing unavailable old release source. Source commit `e3dca10a7a5f1f8f5edb385c36e5a1ea3dcc48e6` and annotated tag `v0.5.0-rc.2` have been pushed and checked against the remote. Later publication-record commits on `main` do not move this source tag.
 

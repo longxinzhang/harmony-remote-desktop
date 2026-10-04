@@ -9,6 +9,12 @@ struct LANConnectionSnapshot {
     var inputSupported: Bool = false
     var inputEnabled: Bool = false
     var inputSent: Int = 0
+    var rttMilliseconds: Double?
+    var jitterMilliseconds: Double?
+    var rttSamples = 0
+    var videoMbps = 0.0
+    var receivedFPS = 0.0
+    var networkType = "未连接"
 }
 
 // Waiting for the user to start sharing is bounded. After the first validated,
@@ -38,6 +44,13 @@ final class LANConnection {
     private let onEnd: (Result<Void, Error>) -> Void
     private let onClipboardSession: (ClipboardSession?) -> Void
     private let onPasteResult: ([String: Any]) -> Void
+    private let onPairedIdentity: (PairingCredentials) -> Void
+    private let onAudioSession: (AudioSession?) -> Void
+    private var pairing: PairingCredentials?
+    private var handshake: PairingHandshake?
+    private var measurements = NetworkMeasurements()
+    private var rttSupported = false
+    private var audioPort: UInt16?
     private var clipboardAdvertised = false
     private var clipboardPort: UInt16 = 39873
     private var clipboardEpoch = ""
@@ -87,7 +100,10 @@ final class LANConnection {
     init(onStatus: @escaping (String) -> Void, onPacket: @escaping (VideoPacket) -> Void,
          onEnd: @escaping (Result<Void, Error>) -> Void,
          onClipboardSession: @escaping (ClipboardSession?) -> Void = { _ in },
-         onPasteResult: @escaping ([String: Any]) -> Void = { _ in }) {
+         onPasteResult: @escaping ([String: Any]) -> Void = { _ in },
+         onPairedIdentity: @escaping (PairingCredentials) -> Void = { _ in },
+         onAudioSession: @escaping (AudioSession?) -> Void = { _ in }) {
+        self.onPairedIdentity = onPairedIdentity; self.onAudioSession = onAudioSession
         self.onStatus = onStatus
         self.onPacket = onPacket
         self.onEnd = onEnd
@@ -100,9 +116,12 @@ final class LANConnection {
                      onStatus: @escaping (String) -> Void, onPacket: @escaping (VideoPacket) -> Void,
                      onEnd: @escaping (Result<Void, Error>) -> Void,
                      onClipboardSession: @escaping (ClipboardSession?) -> Void = { _ in },
-                     onPasteResult: @escaping ([String: Any]) -> Void = { _ in }) {
+                     onPasteResult: @escaping ([String: Any]) -> Void = { _ in },
+                     onPairedIdentity: @escaping (PairingCredentials) -> Void = { _ in },
+                     onAudioSession: @escaping (AudioSession?) -> Void = { _ in }) {
         self.init(onStatus: onStatus, onPacket: onPacket, onEnd: onEnd,
-                  onClipboardSession: onClipboardSession, onPasteResult: onPasteResult)
+                  onClipboardSession: onClipboardSession, onPasteResult: onPasteResult,
+                  onPairedIdentity: onPairedIdentity, onAudioSession: onAudioSession)
         self.controlPort = testControlPort
         self.videoPort = testVideoPort
         self.testLoopback = true
@@ -123,8 +142,8 @@ final class LANConnection {
         try update(&statistics)
     }
 
-    func connect(host: String, pin: String) {
-        queue.async { [weak self] in self?.begin(host: host, pin: pin) }
+    func connect(host: String, pin: String, pairing: PairingCredentials? = nil) {
+        queue.async { [weak self] in self?.begin(host: host, pin: pin, pairing: pairing) }
     }
 
     func disconnect() {
@@ -237,13 +256,14 @@ final class LANConnection {
         inputLock.unlock()
     }
 
-    private func begin(host: String, pin: String) {
+    private func begin(host: String, pin: String, pairing: PairingCredentials?) {
         if active { end(.failure(LANError.cancelled), generation: generation) }
         generation &+= 1
         let run = generation
         active = true
         self.host = host
         self.pin = pin
+        self.pairing = pairing; handshake = nil; measurements = NetworkMeasurements(); rttSupported = false; audioPort = nil
         token = nil
         clipboardAdvertised = false; clipboardEpoch = ""
         parser = WireVideoParser(maxTotalBytes: nil)
@@ -258,7 +278,7 @@ final class LANConnection {
         validHost = validHost || (testLoopback && host == "127.0.0.1")
         #endif
         guard validHost else { end(.failure(LANError.invalidHost), generation: run); return }
-        guard WireProtocol.validPIN(pin) else { end(.failure(LANError.invalidPIN), generation: run); return }
+        guard pairing?.resuming == true || WireProtocol.validPIN(pin) else { end(.failure(LANError.invalidPIN), generation: run); return }
         let now = ProcessInfo.processInfo.systemUptime
         sessionDeadline = LANSessionDeadline(startingAt: sessionTime())
         phaseDeadline = now + 6
@@ -310,6 +330,16 @@ final class LANConnection {
     private func tick(_ run: UInt64) {
         guard isCurrent(run) else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        let current = snapshot
+        measurements.sample(bytes: current.receivedBytes, frames: current.receivedFrames, at: now)
+        updateSnapshot {
+            $0.videoMbps = measurements.videoMbps; $0.receivedFPS = measurements.receivedFPS
+            $0.rttMilliseconds = measurements.rttMilliseconds; $0.jitterMilliseconds = measurements.jitterMilliseconds
+            $0.rttSamples = measurements.rttSamples
+            if let path = control?.currentPath {
+                $0.networkType = path.status == .satisfied ? (path.usesInterfaceType(.wiredEthernet) ? "有线网络" : path.usesInterfaceType(.wifi) ? "Wi-Fi" : "局域网") : "网络不可用"
+            }
+        }
         if sessionDeadline.hasExpired(at: sessionTime()) || (phaseDeadline > 0 && now >= phaseDeadline) ||
             [controlFrameStart, videoFrameStart, parser.assemblyStartedAt].compactMap({ $0 }).contains(where: { now - $0 >= 2 }) ||
             sends.values.contains(where: { now - $0 >= 2 }) {
@@ -321,7 +351,12 @@ final class LANConnection {
             end(.failure(LANError.heartbeatTimeout), generation: run)
         } else if now >= nextPing, let control {
             nextPing = now + 2
-            send(["type": "ping", "sessionToken": token], on: control, run: run)
+            var ping: [String: Any] = ["type": "ping", "sessionToken": token]
+            if rttSupported {
+                let id = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16))
+                measurements.sentProbe(id, at: now); ping["probeId"] = id
+            }
+            send(ping, on: control, run: run)
         }
     }
 
@@ -414,7 +449,7 @@ final class LANConnection {
     private func hello(_ run: UInt64) {
         guard let control, isCurrent(run) else { return }
         phaseDeadline = ProcessInfo.processInfo.systemUptime + 6
-        send(["type": "hello", "protocol": 1, "client": "macOS", "clientVersion": "0.5.0"], on: control, run: run)
+        send(["type": "hello", "protocol": 1, "client": "macOS", "clientVersion": "0.6.0"], on: control, run: run)
         readJSON(from: control, run: run) { [weak self] object in
             guard let self, self.isCurrent(run) else { return }
             guard object["type"] as? String == "hello_ack", WireProtocol.isIntegerOne(object["protocol"]),
@@ -432,14 +467,44 @@ final class LANConnection {
             self.clipboardPort = UInt16(advertisedPort ?? 39873)
             let supported = WireProtocol.isBoolean(object["inputSupported"], true)
             self.updateSnapshot { $0.inputSupported = supported }
-            self.send(["type": "pair", "pin": self.pin], on: control, run: run)
+            self.rttSupported = WireProtocol.isBoolean(object["rttSupported"], true)
+            if let port = ClipboardWire.integer(object["audioPort"], range: 1...65535),
+               port == 39874, WireProtocol.isBoolean(object["audioSupported"], true) { self.audioPort = UInt16(port) }
+            do {
+                if let credential = self.pairing, object["pairingScheme"] != nil {
+                    let proof = try PairingHandshake(hello: object, credentials: credential)
+                    self.handshake = proof
+                    self.send(try proof.request(pin: self.pin), on: control, run: run)
+                } else {
+                    if let credential = self.pairing, credential.resuming || credential.remember { throw PairingError.unsupported }
+                    self.pairing = nil
+                    self.send(["type": "pair", "pin": self.pin], on: control, run: run)
+                }
+            } catch { self.end(.failure(error), generation: run); return }
             self.pin = ""
             self.phaseDeadline = ProcessInfo.processInfo.systemUptime + 6
             self.readJSON(from: control, run: run) { [weak self] object in
                 guard let self, self.isCurrent(run) else { return }
+                if object["type"] as? String == "error" {
+                    let reason = object["error"] as? String ?? ""
+                    if reason == "persistent_pairing_not_allowed" { self.end(.failure(PairingError.enrollmentNotAllowed), generation: run); return }
+                    if reason == "pairing_not_trusted" { self.end(.failure(PairingError.noLongerTrusted), generation: run); return }
+                }
                 guard object["type"] as? String == "pair_ok", let token = object["sessionToken"] as? String,
                       WireProtocol.validToken(token) else { self.end(.failure(LANError.hostRejected), generation: run); return }
+                do {
+                    if let proof = self.handshake {
+                        let verified = try proof.finish(object, token: token)
+                        self.pairing = verified; self.onPairedIdentity(verified)
+                    }
+                } catch { self.end(.failure(error), generation: run); return }
+                self.handshake = nil
                 self.token = token
+                if let audioPort = self.audioPort,
+                   let epoch = object["audioEpoch"] as? String, ClipboardWire.hex(epoch, length: 32),
+                   let binding = object["audioBindToken"] as? String, ClipboardWire.hex(binding, length: 64) {
+                    self.onAudioSession(AudioSession(host: self.host, port: audioPort, epoch: epoch, binding: binding))
+                }
                 if self.clipboardAdvertised,
                    let epoch = object["clipboardEpoch"] as? String, ClipboardWire.hex(epoch, length: 32),
                    let binding = object["clipboardBindToken"] as? String, ClipboardWire.hex(binding, length: 64) {
@@ -465,8 +530,11 @@ final class LANConnection {
             }
             switch object["type"] as? String {
             case "ping":
-                self.send(["type": "pong", "sessionToken": token], on: control, run: run)
-            case "pong": break
+                var pong: [String: Any] = ["type": "pong", "sessionToken": token]
+                if let id = object["probeId"] as? String, ClipboardWire.hex(id, length: 16) { pong["probeId"] = id }
+                self.send(pong, on: control, run: run)
+            case "pong":
+                if let id = object["probeId"] as? String { self.measurements.receivedPong(id, at: ProcessInfo.processInfo.systemUptime) }
             case "input_status":
                 guard WireProtocol.isBoolean(object["enabled"], true) || WireProtocol.isBoolean(object["enabled"], false),
                       self.snapshot.inputSupported else {
@@ -509,7 +577,7 @@ final class LANConnection {
                     self.phaseDeadline = 0
                     self.updateSnapshot { $0.videoReady = true }
                     if self.snapshot.inputSupported { self.resetInput(run: run) }
-                    self.onStatus("视频通道已就绪；请在 Host 点击 Start LAN Capture 并允许录屏。")
+                    self.onStatus("视频通道已就绪；请在鸿蒙端开始共享屏幕。")
                     self.readVideo(run)
                 }
             case .failed: self.end(.failure(LANError.connectionFailed), generation: run)
@@ -553,7 +621,6 @@ final class LANConnection {
                     }
                 }
                 if error != nil || complete {
-                    try self.parser.finish()
                     throw LANError.connectionClosed
                 }
                 self.readVideo(run)
@@ -564,7 +631,8 @@ final class LANConnection {
     private func end(_ result: Result<Void, Error>, generation run: UInt64) {
         guard isCurrent(run) else { return }
         active = false
-        clipboardEpoch = ""; clipboardAdvertised = false; onClipboardSession(nil)
+        clipboardEpoch = ""; clipboardAdvertised = false; onClipboardSession(nil); onAudioSession(nil)
+        handshake = nil; pairing = nil; audioPort = nil
         resetInput(run: nil)
         pendingSends.removeAll(); sendInFlight = false
         updateSnapshot { $0.inputEnabled = false }
@@ -580,7 +648,16 @@ final class LANConnection {
         token = nil
         sends.removeAll()
         oldControl?.stateUpdateHandler = nil
-        if let oldControl, let finalToken,
+        let transportInterrupted: Bool
+        if case .failure(let error) = result, let reason = error as? LANError {
+            switch reason {
+            case .connectionFailed, .connectionClosed, .heartbeatTimeout, .deadline: transportInterrupted = true
+            default: transportInterrupted = false
+            }
+        } else { transportInterrupted = false }
+        // An explicit stop ends capture; a broken transport must instead let
+        // Host's EOF cleanup release input and preserve its bounded grace period.
+        if !transportInterrupted, let oldControl, let finalToken,
            let release = try? WireProtocol.controlFrame(["type": "release_all_keys", "sessionToken": finalToken]),
            let stop = try? WireProtocol.controlFrame(["type": "stop", "sessionToken": finalToken]) {
             // One ordered write: release all held input before stopping the session.
