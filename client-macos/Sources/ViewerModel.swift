@@ -319,7 +319,7 @@ final class ViewerModel: ObservableObject {
 
     private func reportData() throws -> Data {
         let display = mailbox.statistics
-        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "appBuild": 6, "result": lastResult,
+        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "appBuild": 7, "result": lastResult,
             "mode": replay ? "local_replay" : "live_lan", "host": replay ? "" : sessionHost,
             "startedAt": startedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "recordedAt": ISO8601DateFormatter().string(from: Date()),

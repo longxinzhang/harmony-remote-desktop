@@ -61,7 +61,7 @@ def main():
         print(result["stderr"])
     if result["returncode"] != 0 or "success" not in result.get("stdout", "").lower():
         abort("Installation did not report success. Check device state before retrying.")
-    print("Installed. Launch Harmony Remote Probe on the device and perform the visible consent flow.")
+    print("Installed. Launch Harmony Remote on the device and perform the visible consent flow.")
 
 
 if __name__ == "__main__":

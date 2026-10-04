@@ -61,6 +61,53 @@ struct PresentationTests {
         check(notices == 2, "detached mailbox observer receives no new frame notices")
         mailbox.observePendingFrames { notices += 1 }
         check(notices == 3, "attaching to a preloaded mailbox schedules its pending frame")
+        // Exercise the actual view boundary used by workspace navigation. The
+        // surface has no window, and uses synthetic pixels instead of a capture.
+        let gatedMailbox = FrameMailbox()
+        let surface = VideoSurfaceView(mailbox: gatedMailbox)
+        gatedMailbox.put(pixels, ptsUs: 10) // queues an observer callback on main
+        surface.setPresentationEnabled(false)
+        gatedMailbox.put(pixels, ptsUs: 11)
+        run(0.08)
+        check(gatedMailbox.statistics.submitted == 0 && gatedMailbox.take()?.ptsUs == 11,
+              "hiding rejects an already queued callback and preserves the newest frame")
+
+        gatedMailbox.put(pixels, ptsUs: 12); gatedMailbox.put(pixels, ptsUs: 13)
+        run(0.08)
+        check(gatedMailbox.statistics.submitted == 0,
+              "hidden surface does not submit newly arriving frames")
+        surface.setPresentationEnabled(true)
+        run(0.08)
+        check(gatedMailbox.statistics.submitted == 1 && gatedMailbox.take() == nil,
+              "resuming a hidden surface consumes its single latest pending frame")
+        run(0.06)
+        check(gatedMailbox.statistics.submitted == 1,
+              "resumed surface does not repeatedly submit the retained display image")
+
+        surface.setPresentationEnabled(false)
+        let replacementMailbox = FrameMailbox()
+        replacementMailbox.put(pixels, ptsUs: 20)
+        surface.replaceMailbox(replacementMailbox)
+        gatedMailbox.put(pixels, ptsUs: 14)
+        replacementMailbox.put(pixels, ptsUs: 21)
+        run(0.08)
+        check(replacementMailbox.statistics.submitted == 0 && replacementMailbox.take()?.ptsUs == 21,
+              "replacing a hidden mailbox remains inactive and retains its latest frame")
+        check(gatedMailbox.statistics.submitted == 1 && gatedMailbox.take()?.ptsUs == 14,
+              "mailbox replacement detaches the old source from presentation")
+        replacementMailbox.put(pixels, ptsUs: 22)
+        surface.setPresentationEnabled(true)
+        run(0.08)
+        check(replacementMailbox.statistics.submitted == 1 && replacementMailbox.take() == nil,
+              "reenabling after mailbox replacement consumes the new source")
+
+        surface.setPresentationEnabled(false)
+        surface.stop()
+        surface.setPresentationEnabled(true)
+        replacementMailbox.put(pixels, ptsUs: 23)
+        run(0.08)
+        check(replacementMailbox.statistics.submitted == 1 && replacementMailbox.take()?.ptsUs == 23,
+              "stopped view cannot be reactivated by a later visible-page update")
         print("\(count) presentation lifecycle checks passed; no app window, capture, or system clipboard used.")
     }
 }

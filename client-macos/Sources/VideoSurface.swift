@@ -92,6 +92,7 @@ final class VideoSurfaceView: NSView {
     private lazy var presentation = FramePresentationScheduler { [weak self] in self?.presentLatest() }
     private var stopped = false
     private var displayStatusObserver: NSKeyValueObservation?
+    private var presentationEnabled = true
     private let input = RemoteInputEngine()
     private var inputEnabled = false
     private var inputTracking: NSTrackingArea?
@@ -136,7 +137,8 @@ final class VideoSurfaceView: NSView {
         let observed = mailbox
         observed.observePendingFrames { [weak self, weak observed] in
             DispatchQueue.main.async { [weak self, weak observed] in
-                guard let self, let observed, !self.stopped, self.mailbox === observed else { return }
+                guard let self, let observed, !self.stopped, self.presentationEnabled,
+                      self.mailbox === observed else { return }
                 self.presentation.request()
             }
         }
@@ -183,7 +185,17 @@ final class VideoSurfaceView: NSView {
     func replaceMailbox(_ value: FrameMailbox) {
         mailbox.observePendingFrames(nil); presentation.cancel()
         releaseFocus(); display.flushAndRemoveImage(); mailbox = value
-        if !stopped { observeMailbox() }
+        if !stopped && presentationEnabled { observeMailbox() }
+    }
+    func setPresentationEnabled(_ enabled: Bool) {
+        guard enabled != presentationEnabled, !stopped else { return }
+        presentationEnabled = enabled
+        if enabled { observeMailbox() }
+        else {
+            releaseFocus()
+            mailbox.observePendingFrames(nil)
+            presentation.cancel()
+        }
     }
     private func refreshContext(inside: Bool) {
         input.context(enabled: inputEnabled, focused: window?.firstResponder === self,
@@ -347,6 +359,7 @@ final class VideoSurfaceView: NSView {
 
 struct VideoSurface: NSViewRepresentable {
     let mailbox: FrameMailbox
+    var presentationEnabled = true
     var inputEnabled: Bool = false
     var keyboardMode: RemoteKeyboardMode = .macFriendly
     var onInput: ([String: Any]) -> Void = { _ in }
@@ -356,12 +369,14 @@ struct VideoSurface: NSViewRepresentable {
     var onRemoteCopy: () -> Void = {}
     func makeNSView(context: Context) -> VideoSurfaceView {
         let view = VideoSurfaceView(mailbox: mailbox)
+        view.setPresentationEnabled(presentationEnabled)
         view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease,
                             clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste, onRemoteCopy: onRemoteCopy)
         return view
     }
     func updateNSView(_ view: VideoSurfaceView, context: Context) {
         if view.mailbox !== mailbox { view.replaceMailbox(mailbox) }
+        view.setPresentationEnabled(presentationEnabled)
         view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease,
                             clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste, onRemoteCopy: onRemoteCopy)
     }
