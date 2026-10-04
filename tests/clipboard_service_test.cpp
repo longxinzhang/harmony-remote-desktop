@@ -22,7 +22,8 @@ struct Fake final : ClipboardPlatform {
     std::mutex mutex; std::string text = "initial must not sync", tag; uint32_t revision = 1;
     int readCode = 0, writeCode = 0, reads = 0, writes = 0; bool supported = true, deferRevision = false;
     uint32_t Revision() override { std::lock_guard<std::mutex> l(mutex); return revision; }
-    ClipboardText Read() override { std::lock_guard<std::mutex> l(mutex); ++reads; return {text, tag, revision, readCode, supported}; }
+    clipboard_text_policy::Shape shape;
+    ClipboardText Read() override { std::lock_guard<std::mutex> l(mutex); ++reads; return {text, tag, revision, readCode, supported, shape}; }
     int Write(const std::string& value, const std::string& owner) override {
         std::lock_guard<std::mutex> l(mutex); ++writes; if (writeCode) return writeCode;
         text = value; tag = owner; if (!deferRevision) ++revision; return 0;
@@ -117,6 +118,19 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--serve-fixture") return ServeFixture();
         int count = 0; auto test = [&](const char* name, const std::function<void()>& run) { run(); ++count; std::cout << "PASS " << name << '\n'; };
+        test("single plain-text record permits known rich text alternate representations", [] {
+            const char* types[] {"general.plain-text", "general.text", "general.html", "general.xhtml", "general.rich-text"};
+            CHECK(clipboard_text_policy::Check(types, 5, 1) == clipboard_text_policy::Rejection::None); });
+        test("text policy never converts files images links or unknown application data", [] {
+            for (const char* unsupported : {"general.file-uri", "general.image", "openharmony.pixel-map", "general.hyperlink", "text/uri-list", "application.private-notes"}) {
+                const char* types[] {"general.plain-text", unsupported};
+                CHECK(clipboard_text_policy::Check(types, 2, 1) == clipboard_text_policy::Rejection::UnknownRepresentation); }
+            const char* html[] {"general.html"}; CHECK(clipboard_text_policy::Check(html, 1, 1) == clipboard_text_policy::Rejection::MissingPlainText); });
+        test("text policy rejects multiple records and bounds diagnostic metadata", [] {
+            const char* types[] {"general.plain-text"};
+            CHECK(clipboard_text_policy::Check(types, 1, 2) == clipboard_text_policy::Rejection::AmbiguousRecords);
+            CHECK(clipboard_text_policy::Check(types, 33, 1) == clipboard_text_policy::Rejection::TooManyTypes);
+            CHECK(clipboard_text_policy::CappedCount(9999) == 33); });
         test("canonical uint64 and overflow", [] { uint64_t n; CHECK(Decimal("18446744073709551615", n)); CHECK(!Next(n)); CHECK(!Decimal("18446744073709551616", n)); CHECK(!Decimal("01", n)); CHECK(!Decimal("1e3", n)); CHECK(!Decimal("-1", n)); });
         test("strict UTF8 preserves empty whitespace and rejects invalid NUL surrogate overlong", [] { CHECK(UTF8("")); CHECK(UTF8(" 中文🙂\n\t ")); CHECK(!UTF8(std::string("a\0b", 3))); CHECK(!UTF8("\xc0\x80")); CHECK(!UTF8("\xed\xa0\x80")); CHECK(!UTF8("\xf4\x90\x80\x80")); CHECK(!UTF8("\xe4\xb8")); });
         test("strict header duplicates unknown numeric ASCII and bounds", [] { for (auto bad : {
@@ -147,6 +161,42 @@ int main(int argc, char** argv) {
         test("paste guard accepts current ACK and rejects revision changed at execution", [] { Fixture f; CHECK(Get(f.Update("paste").header, "status") == "applied");
             auto good = f.service.Paste(f.epoch, "mac-1", std::chrono::steady_clock::now() + 1s, [](auto check, auto) { return check(); }); CHECK(good.first == "committed");
             auto stale = f.service.Paste(f.epoch, "mac-1", std::chrono::steady_clock::now() + 1s, [&](auto check, auto) { f.platform->Copy("newer"); return check(); }); CHECK(stale.first == "failed"); });
+        test("current Harmony event pastes without replacing original system clipboard", [] { Fixture f;
+            f.platform->Copy("local rich text plain representation"); auto update = Until(f.socket.fd, "clipboard_update"); Ack(f, update);
+            const auto event = Get(update.header, "eventId"); CHECK(event.find("harmony-") == 0);
+            CHECK(f.service.Paste(f.epoch, event, std::chrono::steady_clock::now() + 1s,
+                [](auto check, auto) { return check(); }).first == "committed");
+            CHECK(f.platform->Writes() == 0); CHECK(f.platform->Text() == update.text);
+            CHECK(f.service.Paste(f.epoch, event, std::chrono::steady_clock::now() + 1s,
+                [&](auto check, auto) { f.platform->Copy("newer local copy"); return check(); }).first == "failed"); });
+        test("unsupported local copy prevents paste of previous Mac event before and after polling", [] { Fixture f;
+            CHECK(Get(f.Update("old Terminal text").header, "status") == "applied");
+            { std::lock_guard<std::mutex> lock(f.platform->mutex); f.platform->supported = false; }
+            f.platform->Copy("unsupported Notes selection");
+            CHECK(f.service.Paste(f.epoch, "mac-1", std::chrono::steady_clock::now() + 1s,
+                [](auto check, auto) { return check(); }).first == "stale");
+            Wait([&] { return f.service.SnapshotJson().find("unsupported_clipboard_type") != std::string::npos; });
+            CHECK(f.service.Paste(f.epoch, "mac-1", std::chrono::steady_clock::now() + 1s,
+                [](auto check, auto) { return check(); }).first == "stale");
+            CHECK(f.platform->Writes() == 1); CHECK(f.platform->Text() == "unsupported Notes selection"); });
+        test("unsupported local copy invalidates earlier Harmony event", [] { Fixture f;
+            f.platform->Copy("first local text"); auto update = Until(f.socket.fd, "clipboard_update"); Ack(f, update);
+            { std::lock_guard<std::mutex> lock(f.platform->mutex); f.platform->supported = false; }
+            f.platform->Copy("new unsupported item");
+            CHECK(f.service.Paste(f.epoch, Get(update.header, "eventId"), std::chrono::steady_clock::now() + 1s,
+                [](auto check, auto) { return check(); }).first == "stale"); CHECK(f.platform->Writes() == 0); });
+        test("unsupported copy drops an older unsent update and exposes bounded categories only", [] { Fixture f;
+            f.platform->Copy("first outgoing"); auto first = Until(f.socket.fd, "clipboard_update");
+            f.platform->Copy("queued outgoing"); std::this_thread::sleep_for(250ms);
+            { std::lock_guard<std::mutex> lock(f.platform->mutex); f.platform->supported = false;
+                f.platform->shape = {9999, 9999, clipboard_text_policy::Rejection::UnknownRepresentation}; }
+            f.platform->Copy("private unsupported selection");
+            Wait([&] { return f.service.SnapshotJson().find("unsupported_representation") != std::string::npos; });
+            Ack(f, first); std::this_thread::sleep_for(250ms);
+            while (Available(f.socket.fd, 10)) CHECK(Get(Receive(f.socket.fd).header, "type") == "clipboard_status");
+            const auto snapshot = f.service.SnapshotJson(); CHECK(snapshot.find("\"readTypeCount\":33") != std::string::npos);
+            CHECK(snapshot.find("\"readRecordCount\":33") != std::string::npos);
+            CHECK(snapshot.find("private unsupported selection") == std::string::npos); CHECK(f.platform->Writes() == 0); });
         test("local disable and expired deadline reject paste", [] { Fixture f; CHECK(Get(f.Update("paste").header, "status") == "applied");
             CHECK(f.service.Paste(f.epoch, "mac-1", std::chrono::steady_clock::now() - 1ms, {}).first == "stale"); f.service.Allow(false);
             CHECK(f.service.Paste(f.epoch, "mac-1", std::chrono::steady_clock::now() + 1s, {}).first == "stale"); });

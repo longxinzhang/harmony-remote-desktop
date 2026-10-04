@@ -19,12 +19,23 @@ final class FrameMailbox {
     private var displayError = ""
     private var frameWidth = 0
     private var frameHeight = 0
+    private var onPendingFrame: (() -> Void)?
 
     func put(_ pixels: CVPixelBuffer, ptsUs: UInt64) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        let notify = latest == nil ? onPendingFrame : nil
         if latest != nil { replacements += 1 }
         latest = DecodedFrame(pixels: pixels, ptsUs: ptsUs)
         frameWidth = CVPixelBufferGetWidth(pixels); frameHeight = CVPixelBufferGetHeight(pixels)
+        lock.unlock()
+        notify?()
+    }
+    func observePendingFrames(_ callback: (() -> Void)?) {
+        lock.lock()
+        onPendingFrame = callback
+        let notify = latest != nil ? callback : nil
+        lock.unlock()
+        notify?()
     }
     func take() -> DecodedFrame? {
         lock.lock(); defer { lock.unlock() }
@@ -44,10 +55,43 @@ final class FrameMailbox {
     }
 }
 
+// One wakeup for pending work, never a repeating idle display timer. All calls
+// belong to the main thread; frame arrival is marshalled there by the view.
+final class FramePresentationScheduler {
+    private var timer: Timer?
+    private var lastPresentation: TimeInterval?
+    private var stopped = false
+    private let interval: TimeInterval
+    private let present: () -> Void
+    var isScheduled: Bool { timer != nil }
+
+    init(interval: TimeInterval = 1.0 / 30.0, present: @escaping () -> Void) {
+        self.interval = interval; self.present = present
+    }
+    func request() {
+        guard !stopped, timer == nil else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let delay = lastPresentation.map { max(0, $0 + interval - now) } ?? 0
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self, !self.stopped else { return }
+            self.timer = nil
+            self.lastPresentation = ProcessInfo.processInfo.systemUptime
+            self.present()
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    func cancel() { timer?.invalidate(); timer = nil }
+    func stop() { stopped = true; cancel() }
+    deinit { timer?.invalidate() }
+}
+
 final class VideoSurfaceView: NSView {
     let display = AVSampleBufferDisplayLayer()
     var mailbox: FrameMailbox
-    private var timer: Timer?
+    private lazy var presentation = FramePresentationScheduler { [weak self] in self?.presentLatest() }
+    private var stopped = false
+    private var displayStatusObserver: NSKeyValueObservation?
     private let input = RemoteInputEngine()
     private var inputEnabled = false
     private var inputTracking: NSTrackingArea?
@@ -55,6 +99,7 @@ final class VideoSurfaceView: NSView {
     private var allowsMomentum = false
     private var clipboardPasteEnabled = false
     private var onPaste: (@escaping () -> Bool) -> Void = { _ in }
+    private var onRemoteCopy: () -> Void = {}
     private var focusGeneration: UInt64 = 0
 
     init(mailbox: FrameMailbox) {
@@ -64,12 +109,38 @@ final class VideoSurfaceView: NSView {
         layer = display
         display.backgroundColor = NSColor.black.cgColor
         display.videoGravity = .resizeAspect
-        timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.presentLatest() }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
+        observeMailbox()
+        // status is KVO-observable (AVSampleBufferDisplayLayer.h). Keep observing
+        // asynchronous failure after the last frame without an idle polling timer.
+        displayStatusObserver = display.observe(\.status, options: [.new]) { [weak self] _, change in
+            guard change.newValue == .failed else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped, self.display.status == .failed else { return }
+                self.mailbox.displayed(error: "显示层失败：\((self.display.error as NSError?)?.code ?? -1)")
+            }
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-    func stop() { releaseFocus(); timer?.invalidate(); timer = nil; removeObservers(); display.flushAndRemoveImage() }
-    deinit { timer?.invalidate(); for token in observers { NotificationCenter.default.removeObserver(token) } }
+    func stop() {
+        stopped = true; mailbox.observePendingFrames(nil); presentation.stop()
+        releaseFocus(); removeObservers(); display.flushAndRemoveImage()
+        displayStatusObserver?.invalidate(); displayStatusObserver = nil
+    }
+    deinit {
+        mailbox.observePendingFrames(nil); presentation.stop()
+        for token in observers { NotificationCenter.default.removeObserver(token) }
+        displayStatusObserver?.invalidate()
+    }
+
+    private func observeMailbox() {
+        let observed = mailbox
+        observed.observePendingFrames { [weak self, weak observed] in
+            DispatchQueue.main.async { [weak self, weak observed] in
+                guard let self, let observed, !self.stopped, self.mailbox === observed else { return }
+                self.presentation.request()
+            }
+        }
+    }
 
     override var acceptsFirstResponder: Bool { inputEnabled && window?.isKeyWindow == true && NSApp.isActive }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { false }
@@ -100,15 +171,19 @@ final class VideoSurfaceView: NSView {
     }
     func configureInput(enabled: Bool, keyboardMode: RemoteKeyboardMode,
                         onInput: @escaping ([String: Any]) -> Void, onRelease: @escaping () -> Void,
-                        clipboardPasteEnabled: Bool = false, onPaste: @escaping (@escaping () -> Bool) -> Void = { _ in }) {
+                        clipboardPasteEnabled: Bool = false, onPaste: @escaping (@escaping () -> Bool) -> Void = { _ in },
+                        onRemoteCopy: @escaping () -> Void = {}) {
         if inputEnabled && (!enabled || input.keyboardMode != keyboardMode) { releaseFocus() }
         inputEnabled = enabled; input.keyboardMode = keyboardMode
         input.onInput = onInput; input.onRelease = onRelease
         self.clipboardPasteEnabled = clipboardPasteEnabled; self.onPaste = onPaste
+        self.onRemoteCopy = onRemoteCopy
         refreshContext(inside: input.insideVideo)
     }
     func replaceMailbox(_ value: FrameMailbox) {
+        mailbox.observePendingFrames(nil); presentation.cancel()
         releaseFocus(); display.flushAndRemoveImage(); mailbox = value
+        if !stopped { observeMailbox() }
     }
     private func refreshContext(inside: Bool) {
         input.context(enabled: inputEnabled, focused: window?.firstResponder === self,
@@ -195,6 +270,13 @@ final class VideoSurfaceView: NSView {
         }
         return true
     }
+    private func noteRemoteCopy(_ event: NSEvent) {
+        guard clipboardPasteEnabled, !event.isARepeat,
+              RemoteInputEngine.isClipboardCopy(key: event.keyCode, mode: input.keyboardMode,
+                command: event.modifierFlags.contains(.command), control: event.modifierFlags.contains(.control),
+                shift: event.modifierFlags.contains(.shift), option: event.modifierFlags.contains(.option)) else { return }
+        onRemoteCopy()
+    }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard keyboardReady() else { return super.performKeyEquivalent(with: event) }
         if localKey(event) { return true }
@@ -203,6 +285,7 @@ final class VideoSurfaceView: NSView {
         guard event.modifierFlags.contains(.command), RemoteInputEngine.isCommandShortcut(event.keyCode) else {
             return super.performKeyEquivalent(with: event)
         }
+        noteRemoteCopy(event)
         input.synchronizeModifiers(rawFlags: event.modifierFlags.rawValue)
         input.shortcutStroke(event.keyCode)
         return true
@@ -212,6 +295,7 @@ final class VideoSurfaceView: NSView {
         if localKey(event) { return }
         if reservedKey(event) { releaseFocus(); super.keyDown(with: event); return }
         if clipboardKey(event) { return }
+        noteRemoteCopy(event)
         input.synchronizeModifiers(rawFlags: event.modifierFlags.rawValue)
         input.keyDown(event.keyCode, isRepeat: event.isARepeat)
     }
@@ -269,16 +353,17 @@ struct VideoSurface: NSViewRepresentable {
     var onRelease: () -> Void = {}
     var clipboardPasteEnabled = false
     var onPaste: (@escaping () -> Bool) -> Void = { _ in }
+    var onRemoteCopy: () -> Void = {}
     func makeNSView(context: Context) -> VideoSurfaceView {
         let view = VideoSurfaceView(mailbox: mailbox)
         view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease,
-                            clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste)
+                            clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste, onRemoteCopy: onRemoteCopy)
         return view
     }
     func updateNSView(_ view: VideoSurfaceView, context: Context) {
         if view.mailbox !== mailbox { view.replaceMailbox(mailbox) }
         view.configureInput(enabled: inputEnabled, keyboardMode: keyboardMode, onInput: onInput, onRelease: onRelease,
-                            clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste)
+                            clipboardPasteEnabled: clipboardPasteEnabled, onPaste: onPaste, onRemoteCopy: onRemoteCopy)
     }
     static func dismantleNSView(_ view: VideoSurfaceView, coordinator: ()) { view.stop() }
 }

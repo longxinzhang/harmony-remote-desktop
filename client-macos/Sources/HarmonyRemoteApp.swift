@@ -79,7 +79,8 @@ struct ViewerWindow: View {
                 Color.black
                 VideoSurface(mailbox: model.mailbox, inputEnabled: model.canControl && model.inputEnabled,
                     keyboardMode: model.keyboardMode, onInput: model.sendInput, onRelease: model.releaseInputs,
-                    clipboardPasteEnabled: model.clipboardPasteEnabled, onPaste: model.pasteClipboard)
+                    clipboardPasteEnabled: model.clipboardPasteEnabled, onPaste: model.pasteClipboard,
+                    onRemoteCopy: model.remoteCopyIntent)
                 if model.decodedFrames == 0 {
                     VStack(spacing: 12) {
                         Image(systemName: "display.2").font(.system(size: 48))

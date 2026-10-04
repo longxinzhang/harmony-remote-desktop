@@ -101,14 +101,16 @@ final class ViewerModel: ObservableObject {
             guard let self, self.canControl, self.inputEnabled, let permit = self.clipboard.pastePermit else { return }
             self.connection?.commitPaste(epoch: epoch, event: event, operation: operation, ttl: ttl, permit: permit)
         }
-        let clipboardTimer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.clipboard.tick() }
-        }
-        self.clipboardTimer = clipboardTimer; RunLoop.main.add(clipboardTimer, forMode: .common)
+    }
+
+    private func startStatisticsTimer() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
+
+    deinit { timer?.invalidate(); clipboardTimer?.invalidate() }
 
     func startArguments() {
         guard !startedArguments else { return }; startedArguments = true
@@ -128,6 +130,7 @@ final class ViewerModel: ObservableObject {
         generation = UUID(); mailbox = FrameMailbox()
         let decoder = DecodePipeline(mailbox: mailbox); pipeline = decoder
         active = true; failed = false; replay = isReplay
+        startStatisticsTimer()
         inputEnabled = false; inputSupported = false
         receivedFrames = 0; decodedFrames = 0; renderedFrames = 0; displayReplacements = 0
         dimensions = "—"; hardware = "待检测"; lastResult = "RUNNING"; startedAt = Date()
@@ -184,6 +187,7 @@ final class ViewerModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self, self.generation == id else { return }
                 self.updateDecoder(snapshot); self.active = false
+                self.timer?.invalidate(); self.timer = nil
                 switch outcome {
                 case .success:
                     self.lastResult = self.replay ? "LOCAL_REPLAY_DECODED" : "LIVE_STREAM_DECODED"
@@ -209,6 +213,7 @@ final class ViewerModel: ObservableObject {
         connection?.disconnect(); pipeline?.cancel()
         inputEnabled = false
         active = false; state = "已断开"; detail = "当前保留最后一帧。"; lastResult = "USER_STOPPED"
+        timer?.invalidate(); timer = nil; refresh()
         pin = ""
     }
 
@@ -248,9 +253,19 @@ final class ViewerModel: ObservableObject {
         clipboardChannel?.close(); clipboardChannel = nil; clipboard.stop(reason: reason)
     }
     private func refreshClipboard() {
-        clipboardStatus = clipboard.status; clipboardConnected = clipboard.connected
-        clipboardPasteEnabled = clipboard.mode.sends // Consume paste even while permission/transport is unavailable.
-        clipboardPullEnabled = clipboard.canPull
+        if clipboardStatus != clipboard.status { clipboardStatus = clipboard.status }
+        if clipboardConnected != clipboard.connected { clipboardConnected = clipboard.connected }
+        // Consume paste even while permission/transport is unavailable.
+        if clipboardPasteEnabled != clipboard.mode.sends { clipboardPasteEnabled = clipboard.mode.sends }
+        if clipboardPullEnabled != clipboard.canPull { clipboardPullEnabled = clipboard.canPull }
+        if clipboard.connected && clipboard.mode.sends && clipboard.allowed {
+            if clipboardTimer == nil {
+                let poll = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+                    Task { @MainActor in self?.clipboard.tick() }
+                }
+                clipboardTimer = poll; RunLoop.main.add(poll, forMode: .common)
+            }
+        } else { clipboardTimer?.invalidate(); clipboardTimer = nil }
     }
     func setClipboardMode(_ mode: ClipboardMode) {
         if !clipboardMode.sends && mode.sends { clipboardAdapter.allowOneAutomaticReadAttempt() }
@@ -258,6 +273,10 @@ final class ViewerModel: ObservableObject {
         clipboard.setMode(mode); refreshClipboard()
     }
     func pullClipboard() { clipboard.pull() }
+    func remoteCopyIntent() {
+        guard canControl, inputEnabled else { return }
+        clipboard.noteRemoteCopyIntent()
+    }
     func pasteClipboard(valid: @escaping () -> Bool) {
         guard canControl, inputEnabled else { return }
         clipboard.requestPaste(valid: { [weak self] in
@@ -274,24 +293,33 @@ final class ViewerModel: ObservableObject {
 
     private func refresh() {
         if !replay, let snapshot = connection?.snapshot {
-            receivedFrames = snapshot.receivedFrames
-            inputSupported = snapshot.inputSupported
-            inputEnabled = active && snapshot.inputEnabled
+            if receivedFrames != snapshot.receivedFrames { receivedFrames = snapshot.receivedFrames }
+            if inputSupported != snapshot.inputSupported { inputSupported = snapshot.inputSupported }
+            let enabled = active && snapshot.inputEnabled
+            if inputEnabled != enabled { inputEnabled = enabled }
         }
         if active, let snapshot = pipeline?.snapshot { updateDecoder(snapshot) }
         let display = mailbox.statistics
-        renderedFrames = display.submitted; displayReplacements = display.replaced
-        if !display.error.isEmpty { failed = true; detail = display.error }
+        if renderedFrames != display.submitted { renderedFrames = display.submitted }
+        if displayReplacements != display.replaced { displayReplacements = display.replaced }
+        if !display.error.isEmpty {
+            if !failed { failed = true }
+            if detail != display.error { detail = display.error }
+        }
     }
     private func updateDecoder(_ snapshot: DecoderSnapshot) {
-        decodedFrames = snapshot.decodedFrames
-        if snapshot.width > 0 { dimensions = "\(snapshot.width) × \(snapshot.height)" }
-        hardware = snapshot.hardwareAccelerated.map { $0 ? "已确认硬解" : "软件解码" } ?? "未确认"
+        if decodedFrames != snapshot.decodedFrames { decodedFrames = snapshot.decodedFrames }
+        if snapshot.width > 0 {
+            let size = "\(snapshot.width) × \(snapshot.height)"
+            if dimensions != size { dimensions = size }
+        }
+        let acceleration = snapshot.hardwareAccelerated.map { $0 ? "已确认硬解" : "软件解码" } ?? "未确认"
+        if hardware != acceleration { hardware = acceleration }
     }
 
     private func reportData() throws -> Data {
         let display = mailbox.statistics
-        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "appBuild": 5, "result": lastResult,
+        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.5.0", "appBuild": 6, "result": lastResult,
             "mode": replay ? "local_replay" : "live_lan", "host": replay ? "" : sessionHost,
             "startedAt": startedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "recordedAt": ISO8601DateFormatter().string(from: Date()),

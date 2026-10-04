@@ -24,6 +24,9 @@ interface ClipboardSnapshot {
   sent: number;
   received: number;
   applied: number;
+  readCategory: string;
+  readTypeCount: number;
+  readRecordCount: number;
   error: string;
   errorCode: number;
 }
@@ -186,7 +189,7 @@ struct Index {
       if (clipboard.error.length > 0) {
         this.clipboardSummary += ` · ${clipboard.error} (${clipboard.errorCode})`;
       }
-      const clipboardState = `${clipboard.allowed}:${clipboard.bound}:${clipboard.mode}:${clipboard.canRead}:${clipboard.canWrite}:${clipboard.sent}:${clipboard.applied}:${clipboard.errorCode}`;
+      const clipboardState = `${clipboard.allowed}:${clipboard.bound}:${clipboard.mode}:${clipboard.canRead}:${clipboard.canWrite}:${clipboard.sent}:${clipboard.applied}:${clipboard.errorCode}:${clipboard.error}:${clipboard.readCategory}:${clipboard.readTypeCount}:${clipboard.readRecordCount}`;
       if (this.clipboardStateSnapshot !== '' && clipboardState !== this.clipboardStateSnapshot) {
         this.persistDiagnostics();
       }
@@ -301,7 +304,7 @@ struct Index {
   private persistDiagnostics(): void {
     const device: DeviceSnapshot = {
       appVersion: '0.5.0',
-      appBuild: 1000008,
+      appBuild: 1000009,
       sessionMode: this.sessionMode,
       deviceType: deviceInfo.deviceType,
       osFullName: deviceInfo.osFullName,

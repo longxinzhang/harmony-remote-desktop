@@ -46,6 +46,10 @@ final class ClipboardCoordinator {
     private var localFence: ClipboardVersion?
     private var currentVersion: ClipboardVersion { current?.version ?? localFence ?? .zero }
     private var remoteKnown: ClipboardVersion?
+    // Remote copy/cut can precede a Host update, including unsupported content.
+    // Until either clipboard changes, an old unsynchronized Mac baseline must
+    // not become a fresh Mac copy just because the user then presses paste.
+    private var remoteCopyRevision: Int?
     private var inFlight: ClipboardFrame?
     private var flightStarted: TimeInterval = 0
     private var latest: ClipboardFrame?
@@ -83,13 +87,13 @@ final class ClipboardCoordinator {
         observationGeneration = UUID()
         paste?.permit.cancel()
         connected = false; allowed = false; canRead = false; canWrite = false
-        epoch = ""; logical = 0; current = nil; localFence = nil; remoteKnown = nil; inFlight = nil; latest = nil; paste = nil; pendingModeID = nil
+        epoch = ""; logical = 0; current = nil; localFence = nil; remoteKnown = nil; remoteCopyRevision = nil; inFlight = nil; latest = nil; paste = nil; pendingModeID = nil
         observed = adapter.revision; status = reason; onChange()
     }
     func setMode(_ value: ClipboardMode) {
         guard mode != value else { return }
         observationGeneration = UUID()
-        mode = value; cancelPaste(); inFlight = nil; latest = nil; current = nil; localFence = nil; remoteKnown = nil
+        mode = value; cancelPaste(); inFlight = nil; latest = nil; current = nil; localFence = nil; remoteKnown = nil; remoteCopyRevision = nil
         observed = adapter.revision
         if connected { sendMode() }
         status = value == .off ? "剪贴板同步已关闭" : "已更新方向，仅同步之后的复制"; onChange()
@@ -107,6 +111,8 @@ final class ClipboardCoordinator {
         case .encoding: return "文字编码无效或包含空字符，未同步"
         case .timeout: return "剪贴板尚未同步，请重试"
         case .changed, .stale: return "剪贴板已变化，本次粘贴已取消"
+        case .remoteCopyPending: return "远端复制尚未同步，本次未发送 Mac 旧内容；请稍后重试或在 Mac 重新复制"
+        case .freshCopyRequired: return "开启同步后请重新复制文字；本次未发送 Mac 旧内容"
         case .write: return "系统剪贴板写入失败"
         case .cancelled: return "已取消等待中的粘贴"
         default: return "剪贴板不可用（\(failure.rawValue)）"
@@ -130,14 +136,24 @@ final class ClipboardCoordinator {
             fail(error)
         }
     }
-    private func local(explicit: Bool, forceNew: Bool = false) throws -> ClipboardVersion {
+    private func local(explicit: Bool) throws -> ClipboardVersion {
         let generation = observationGeneration
         let snapshot = try adapter.read(explicit: explicit)
         _ = try ClipboardWire.text(snapshot.text)
         guard generation == observationGeneration, connected, allowed, mode.sends,
               snapshot.revision == adapter.revision else { throw ClipboardFailure.changed }
+        if remoteCopyRevision == snapshot.revision {
+            // The remote app may not have handled Copy yet. Even a confirmed
+            // old event could still match its live revision in this interval.
+            throw ClipboardFailure.remoteCopyPending
+        }
+        remoteCopyRevision = nil
+        // Mode activation and reconnection deliberately sample no initial text.
+        // Explicit paste must not promote that untouched baseline either: a
+        // newer Host copy may exist without a transferable text representation.
+        guard current != nil || snapshot.revision != observed else { throw ClipboardFailure.freshCopyRequired }
         observed = snapshot.revision
-        if !forceNew, let current, current.revision == snapshot.revision, current.data == snapshot.text,
+        if let current, current.revision == snapshot.revision, current.data == snapshot.text,
            current.owner == snapshot.owner { return current.version }
         // A fresh system revision is a fresh user copy, even when the text is identical.
         guard logical < UInt64.max else { throw ClipboardFailure.overflow }
@@ -175,7 +191,7 @@ final class ClipboardCoordinator {
             canWrite = WireProtocol.isBoolean(frame.header["canWrite"], true)
             if wasAllowed != allowed {
                 observationGeneration = UUID()
-                observed = adapter.revision; current = nil; localFence = nil; remoteKnown = nil; inFlight = nil; latest = nil; cancelPaste()
+                observed = adapter.revision; current = nil; localFence = nil; remoteKnown = nil; remoteCopyRevision = nil; inFlight = nil; latest = nil; cancelPaste()
             }
             if !allowed { cancelPaste() }
             let error = frame.header["error"] as? String ?? ""
@@ -220,7 +236,9 @@ final class ClipboardCoordinator {
             guard let version = frame.version else { throw ClipboardFailure.malformed }
             logical = max(logical, version.counter)
             let applied = frame.header["status"] as? String == "applied" && version == flight.version
-            if applied { remoteKnown = version }
+            // An older write ACK may arrive after a newer Harmony copy.
+            // Keep the newest confirmed remote event across the two directions.
+            if applied, remoteKnown.map({ version > $0 }) ?? true { remoteKnown = version }
             inFlight = nil
             if paste?.event == flight.version?.eventID {
                 if applied { commitPaste() } else { cancelPaste(reason: .stale) }
@@ -242,20 +260,33 @@ final class ClipboardCoordinator {
         guard canPull else { status = "鸿蒙 → Mac 方向或读取权限尚未开启"; onChange(); return }
         onSend(ClipboardWire.make("clipboard_pull", epoch: epoch)); status = "正在获取远端纯文字"; onChange()
     }
+    func noteRemoteCopyIntent() {
+        guard connected, mode.sends, allowed else { return }
+        observationGeneration = UUID()
+        cancelPaste(reason: .changed)
+        // Copies still waiting behind an earlier write predate this remote
+        // intent. Do not publish them later or use them to reject its reply.
+        latest = nil
+        if let current, remoteKnown != current.version { self.current = nil; localFence = nil }
+        remoteCopyRevision = adapter.revision
+        observed = adapter.revision
+    }
     func requestPaste(valid: @escaping () -> Bool) {
         cancelPaste()
         guard connected else { status = "剪贴板通道未连接，本次粘贴未发送"; onChange(); return }
         guard mode.sends, allowed else { status = "请先开启 Mac → 鸿蒙方向并在鸿蒙端允许剪贴板"; onChange(); return }
         guard valid() else { fail(ClipboardFailure.cancelled); return }
         do {
-            // Explicit paste is a fresh user intent. Host must first write a Mac
-            // event even if the existing local text originated on Harmony.
-            let version = try local(explicit: true, forceNew: true)
+            // A paste is not a new copy. Reuse an unchanged synchronized event
+            // so Host can reject it if its clipboard changed before this paste.
+            // A fresh local revision still creates a Mac event and waits for
+            // its applied ACK; an untouched initial baseline is never sent.
+            let version = try local(explicit: true)
             let deadline = now() + 1.5
             paste = Paste(operation: ClipboardWire.identifier(), event: version.eventID, deadline: deadline, valid: valid,
                           permit: ClipboardPastePermit(deadline: deadline, now: now))
             if remoteKnown == version { commitPaste() }
-            else if inFlight?.version != version && latest?.version != version, let current {
+            else if version.origin == "mac", inFlight?.version != version && latest?.version != version, let current {
                 enqueue(ClipboardWire.make("clipboard_update", epoch: epoch,
                     extra: ["originId": "mac", "counter": String(version.counter), "eventId": version.eventID,
                             "mime": ClipboardWire.mime, "sha256": ClipboardWire.digest(current.data)], payload: current.data))

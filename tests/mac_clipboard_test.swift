@@ -238,7 +238,7 @@ private func nativeIntegration(_ path: String) throws {
     check(nativePasteResults == 0, "expired queued paste reached native")
     connection.releaseInputs(); engine.requestPaste(valid: { true })
     try until("native paste result") { engine.committedCount == 1 }
-    check(engine.sentCount == 4 && nativePasteResults == 1, "paste emitted more than once or lost a fresh Mac event")
+    check(engine.sentCount == 1 && nativePasteResults == 1, "unchanged Harmony clipboard was republished as a Mac copy")
     engine.pull(); try until("native explicit pull") { engine.appliedCount == 2 }
     check(board.data == Data("Harmony fixture → Mac\n末尾空格 ".utf8))
     engine.setMode(.off); try until("native off") { !engine.allowed || engine.mode == .off }
@@ -294,6 +294,18 @@ private func nativeIntegration(_ path: String) throws {
             r.engine.setMode(.toHarmony); r.status(); r.engine.tick(); check(r.board.reads == 0)
             r.engine.stop(); r.board.copy("during disconnect"); r.engine.start(epoch: epoch, mode: .both); r.engine.ready(); r.status(); r.engine.tick()
             check(r.updates.isEmpty && r.board.reads == 0)
+        }
+        test("explicit paste cannot publish untouched activation or reconnection baseline") {
+            let r = Rig(); r.engine.requestPaste(valid: { true })
+            check(r.updates.isEmpty && r.commits.isEmpty && r.engine.status.contains("开启同步后请重新复制文字"))
+            r.board.copy("copied before new mode"); r.engine.setMode(.toHarmony); r.status()
+            r.engine.requestPaste(valid: { true }); check(r.updates.isEmpty && r.commits.isEmpty)
+            r.engine.stop(); r.board.copy("copied while disconnected")
+            r.engine.start(epoch: epoch, mode: .both); r.engine.ready(); r.status()
+            r.engine.requestPaste(valid: { true }); check(r.updates.isEmpty && r.commits.isEmpty)
+            r.board.copy("fresh copy after reconnect"); r.engine.requestPaste(valid: { true })
+            check(r.updates.count == 1 && r.commits.isEmpty)
+            try! r.engine.receive(applied(r.updates[0])); check(r.commits.count == 1)
         }
         test("first write permitted with diagnostic canWrite=false and repeated text remains fresh event") {
             let r = Rig(); r.board.copy("same"); r.engine.tick(); check(r.updates.count == 1)
@@ -354,27 +366,102 @@ private func nativeIntegration(_ path: String) throws {
             check(r.updates[1].payload == Data("sample 99".utf8))
         }
         test("paste waits applied exact message event and current version then commits once") {
-            let r = Rig(); r.engine.requestPaste(valid: { true }); check(r.updates.count == 1 && r.commits.isEmpty)
+            let r = Rig(); r.board.copy("fresh paste"); r.engine.requestPaste(valid: { true }); check(r.updates.count == 1 && r.commits.isEmpty)
             var wrong = applied(r.updates[0]); wrong.header["messageId"] = ClipboardWire.identifier()
             try! r.engine.receive(wrong); check(r.commits.isEmpty)
             try! r.engine.receive(applied(r.updates[0])); check(r.commits.count == 1)
             try! r.engine.receive(applied(r.updates[0])); check(r.commits.count == 1)
         }
-        test("explicit paste after remote event writes a new Mac event before commit") {
+        test("explicit paste reuses unchanged synchronized Harmony event without overwriting Host") {
             let r = Rig(); try! r.engine.receive(update()); r.engine.requestPaste(valid: { true })
-            check(r.updates.count == 1 && r.commits.isEmpty && r.updates[0].version?.eventID == "mac-2")
+            check(r.updates.isEmpty && r.commits.count == 1 && r.commits[0].1 == "harmony-1")
+        }
+        test("unpublished newer Host copy rejects old paste without Mac overwriting clipboard") {
+            let r = Rig(); try! r.engine.receive(update(7, Data("previous terminal copy".utf8)))
+            // The Host now holds a newer Notes copy that has not reached Mac.
+            // Only its live revision guard can detect this; Mac must not turn
+            // the unchanged older synchronized snapshot into a fresh update.
+            r.engine.requestPaste(valid: { true })
+            check(r.updates.isEmpty && r.commits.count == 1 && r.commits[0].1 == "harmony-7")
+            r.engine.pasteResult(["operationId": r.commits[0].2, "status": "stale"])
+            check(r.updates.isEmpty && !r.engine.pastePending && r.engine.committedCount == 0)
+            try! r.engine.receive(update(8, Data("newer notes copy".utf8)))
+            r.engine.requestPaste(valid: { true })
+            check(r.updates.isEmpty && r.commits.count == 2 && r.commits[1].1 == "harmony-8")
+        }
+        test("unchanged acknowledged Mac copy is reused without another update") {
+            let r = Rig(); r.board.copy("local"); r.engine.poll()
+            try! r.engine.receive(applied(r.updates[0])); r.engine.requestPaste(valid: { true })
+            check(r.updates.count == 1 && r.commits.count == 1 && r.commits[0].1 == "mac-1")
+        }
+        test("late Mac applied ACK cannot regress newer synchronized Harmony event") {
+            let r = Rig(); r.board.copy("earlier Mac copy"); r.engine.poll()
+            let earlier = r.updates[0]; try! r.engine.receive(update(2))
+            try! r.engine.receive(applied(earlier)); r.engine.requestPaste(valid: { true })
+            check(r.updates.count == 1 && r.commits.count == 1 && r.commits[0].1 == "harmony-2")
+        }
+        test("fresh Mac copy of same synchronized text creates a new event before paste") {
+            let r = Rig(); try! r.engine.receive(update())
+            r.board.copy(String(data: r.board.data, encoding: .utf8)!); r.engine.requestPaste(valid: { true })
+            check(r.updates.count == 1 && r.updates[0].version?.eventID == "mac-2" && r.commits.isEmpty)
             try! r.engine.receive(applied(r.updates[0])); check(r.commits.count == 1 && r.commits[0].1 == "mac-2")
+        }
+        test("same revision owner change cannot reuse synchronized paste event") {
+            let r = Rig(); try! r.engine.receive(update()); r.board.owner = nil
+            r.engine.requestPaste(valid: { true })
+            check(r.updates.count == 1 && r.updates[0].version?.eventID == "mac-2" && r.commits.isEmpty)
+        }
+        test("remote copy before first synchronization cannot publish old Mac baseline on paste") {
+            let r = Rig(); r.engine.noteRemoteCopyIntent(); r.engine.requestPaste(valid: { true })
+            check(r.updates.isEmpty && r.commits.isEmpty && !r.engine.pastePending)
+            check(r.engine.status.contains("远端复制尚未同步") && r.engine.status.contains("未发送 Mac 旧内容"))
+        }
+        test("remote copy intent blocks even confirmed old event before Host copy is delivered") {
+            let r = Rig(); try! r.engine.receive(update())
+            r.engine.noteRemoteCopyIntent(); r.engine.requestPaste(valid: { true })
+            check(r.updates.isEmpty && r.commits.isEmpty && !r.engine.pastePending)
+            check(r.engine.status.contains("远端复制尚未同步"))
+            let pending = Rig(); pending.board.copy("unconfirmed Mac copy"); pending.engine.poll()
+            pending.engine.noteRemoteCopyIntent(); pending.engine.requestPaste(valid: { true })
+            check(pending.updates.count == 1 && pending.commits.isEmpty)
+            try! pending.engine.receive(applied(pending.updates[0])); check(pending.commits.isEmpty)
+        }
+        test("fresh Mac copy after remote copy intent remains an explicit new event") {
+            let r = Rig(); r.engine.noteRemoteCopyIntent(); r.board.copy("copied later on Mac")
+            r.engine.requestPaste(valid: { true })
+            check(r.updates.count == 1 && r.commits.isEmpty)
+            try! r.engine.receive(applied(r.updates[0])); check(r.commits.count == 1)
+        }
+        test("received Harmony copy after remote copy intent can be pasted without rewrite") {
+            for unobservedLocalCopy in [false, true] {
+                let r = Rig(); if unobservedLocalCopy { r.board.copy("local copy before remote shortcut") }
+                r.engine.noteRemoteCopyIntent(); try! r.engine.receive(update()); r.engine.requestPaste(valid: { true })
+                check(r.updates.isEmpty && r.commits.count == 1 && r.commits[0].1 == "harmony-1")
+            }
+        }
+        test("remote copy cancels a pending paste before delayed ACK") {
+            let r = Rig(); r.board.copy("fresh paste"); r.engine.requestPaste(valid: { true }); let frame = r.updates[0]
+            r.engine.noteRemoteCopyIntent(); try! r.engine.receive(applied(frame))
+            check(r.commits.isEmpty && !r.engine.pastePending)
+        }
+        test("remote copy supersedes queued unsent Mac copy and accepts newer Host reply") {
+            let r = Rig(); r.board.copy("first local copy"); r.engine.poll(); let flight = r.updates[0]
+            r.board.copy("queued local copy"); r.engine.poll(); check(r.updates.count == 1)
+            r.engine.noteRemoteCopyIntent(); try! r.engine.receive(applied(flight))
+            check(r.updates.count == 1)
+            try! r.engine.receive(update(2)); r.engine.requestPaste(valid: { true })
+            check(r.board.writes == 1 && r.updates.count == 1 && r.commits.count == 1 && r.commits[0].1 == "harmony-2")
         }
         test("focus loss timeout mode change disconnect cancel before delayed applied") {
             for reason in 0..<4 {
-                let r = Rig(); var focus = true; r.engine.requestPaste(valid: { focus }); let frame = r.updates[0]
+                let r = Rig(); r.board.copy("fresh paste"); var focus = true; r.engine.requestPaste(valid: { focus }); let frame = r.updates[0]
                 switch reason { case 0: focus = false; case 1: r.time = 2; case 2: r.engine.setMode(.off); default: r.engine.stop() }
                 if reason != 3 { try! r.engine.receive(applied(frame)); r.engine.tick() }
                 check(r.commits.isEmpty)
             }
         }
         test("copy after request or read race never commits stale content") {
-            let r = Rig(); r.engine.requestPaste(valid: { true }); let frame = r.updates[0]; r.board.copy("new")
+            let r = Rig(); r.board.copy("fresh paste"); r.engine.requestPaste(valid: { true }); let frame = r.updates[0]; r.board.copy("new")
             try! r.engine.receive(applied(frame)); check(r.commits.isEmpty)
             let race = Rig(); race.board.race = true; race.engine.requestPaste(valid: { true }); check(race.updates.isEmpty)
         }
@@ -413,14 +500,14 @@ private func nativeIntegration(_ path: String) throws {
             check(r.engine.status.contains("未授权") && r.engine.status.contains("仍可尝试") && r.engine.canPaste)
         }
         test("paste result applies only matching operation and no automatic retry") {
-            let r = Rig(); r.engine.requestPaste(valid: { true }); try! r.engine.receive(applied(r.updates[0]))
+            let r = Rig(); r.board.copy("fresh paste"); r.engine.requestPaste(valid: { true }); try! r.engine.receive(applied(r.updates[0]))
             r.engine.pasteResult(["operationId": "other", "status": "committed"]); check(r.engine.committedCount == 0)
             r.engine.pasteResult(["operationId": r.commits[0].2, "status": "committed"]); check(r.engine.committedCount == 1)
             r.time = 10; r.engine.tick(); check(r.commits.count == 1)
         }
         test("queued paste permit revoked by release, expiration, mode and disconnect") {
             for reason in 0..<4 {
-                let r = Rig(); r.engine.requestPaste(valid: { true }); try! r.engine.receive(applied(r.updates[0]))
+                let r = Rig(); r.board.copy("fresh paste"); r.engine.requestPaste(valid: { true }); try! r.engine.receive(applied(r.updates[0]))
                 let permit = r.engine.pastePermit!; check(permit.remainingMilliseconds() == 1500)
                 switch reason { case 0: r.engine.cancelPaste(); case 1: r.time = 1.5; case 2: r.engine.setMode(.off); default: r.engine.stop() }
                 check(permit.remainingMilliseconds() == nil)
@@ -434,6 +521,17 @@ private func nativeIntegration(_ path: String) throws {
                 check(RemoteInputEngine.isClipboardPaste(key: 9, mode: mode, command: true, control: false, shift: false, option: false) == (mode == .macFriendly))
                 check(!RemoteInputEngine.isClipboardPaste(key: 8, mode: mode, command: true, control: false, shift: false, option: false))
             }
+        }
+        test("remote copy and cut intent follows forwarded Ctrl and MacFriendly Command shortcuts") {
+            for key: UInt16 in [7, 8] {
+                check(RemoteInputEngine.isCommandShortcut(key))
+                for mode in [RemoteKeyboardMode.macFriendly, .raw] {
+                    check(RemoteInputEngine.isClipboardCopy(key: key, mode: mode, command: false, control: true, shift: false, option: false))
+                    check(RemoteInputEngine.isClipboardCopy(key: key, mode: mode, command: true, control: false, shift: false, option: false) == (mode == .macFriendly))
+                    check(!RemoteInputEngine.isClipboardCopy(key: key, mode: mode, command: true, control: false, shift: true, option: false))
+                }
+            }
+            check(!RemoteInputEngine.isClipboardCopy(key: 9, mode: .macFriendly, command: true, control: false, shift: false, option: false))
         }
         test("paste release clears held modifiers before barrier and next chord restores flags") {
             var keys: [String] = []; var releases = 0

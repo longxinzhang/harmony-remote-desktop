@@ -62,6 +62,8 @@ enum ClipboardFailure: String, Error, LocalizedError {
     case denied = "READ_PERMISSION_REQUIRED", unsupported = "UNSUPPORTED_CONTENT", changed = "CLIPBOARD_CHANGED"
     case write = "WRITE_FAILED", transport = "CHANNEL_CLOSED", timeout = "CLIPBOARD_TIMEOUT"
     case overflow = "COUNTER_EXHAUSTED", stale = "STALE", cancelled = "CANCELLED"
+    case remoteCopyPending = "REMOTE_COPY_PENDING"
+    case freshCopyRequired = "FRESH_COPY_REQUIRED"
     var errorDescription: String? { rawValue }
 }
 

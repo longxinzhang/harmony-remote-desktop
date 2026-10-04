@@ -87,10 +87,12 @@ struct ClipboardService::Impl {
     int errorCode = 0, mode = 0;
     bool allowed = false, permission = false, readFailed = false, canRead = false, canWrite = false;
     bool bound = false, used = false, baselinePending = true, statusPending = false, selfWritePending = false;
+    bool pasteReady = false;
     uint64_t generation = 0, lamport = 0, sent = 0, received = 0, applied = 0;
     Version current;
-    uint32_t baseline = 0, appliedRevision = 0;
+    uint32_t baseline = 0, appliedRevision = 0, pasteRevision = 0;
     std::string appliedTag, appliedDigest;
+    clipboard_text_policy::Shape readShape;
     Time bindDeadline {}, retryReadAfter {};
     std::optional<Update> latest, awaiting;
     Time ackDeadline {};
@@ -99,6 +101,7 @@ struct ClipboardService::Impl {
         ++generation; baselinePending = true; statusPending = true;
         latest.reset();
         appliedTag.clear(); appliedDigest.clear(); appliedRevision = 0; selfWritePending = false;
+        pasteReady = false;
     }
     void ErrorLocked(const std::string& value, int code = 0) { error = value; errorCode = code; statusPending = true; }
     void Drop(const std::string& reason)
@@ -168,6 +171,7 @@ struct ClipboardService::Impl {
         if (read && sample.supported && !platform->Digest(sample.text, digest)) { sample.code = 9200004; sample.supported = false; }
         std::lock_guard<std::mutex> lock(mutex); if (gen != generation) return;
         if (platform->Revision() != revision) return; // Retry a newer local revision on the next poll.
+        if (read) readShape = sample.shape;
         if (read && sample.code != 0 && sample.code != 201) {
             canRead = false; ErrorLocked("read_failed", sample.code);
             retryReadAfter = Clock::now() + std::chrono::seconds(2);
@@ -180,6 +184,7 @@ struct ClipboardService::Impl {
             baseline = revision; selfWritePending = false; canRead = true; statusPending = true; return;
         }
         selfWritePending = false; appliedTag.clear(); appliedDigest.clear();
+        pasteReady = false; latest.reset();
         baseline = revision;
         if (read) {
             canRead = sample.code == 0;
@@ -191,6 +196,9 @@ struct ClipboardService::Impl {
         current = {lamport, "harmony"};
         if (!publish || !read || !sample.supported || sample.code != 0) return;
         std::string id = Random(16); if (id.empty()) { ErrorLocked("entropy_unavailable"); return; }
+        // A local text copy can be pasted in place. The peer need not write the
+        // same content back, which would flatten the original rich clipboard.
+        pasteRevision = revision; pasteReady = true;
         latest = Update {current, std::move(id), std::move(sample.text), std::move(digest)};
     }
     bool SendLatest(const Sock& socket)
@@ -227,6 +235,7 @@ struct ClipboardService::Impl {
             else {
                 const std::string tag = "hrd:" + epoch + ":" + incoming.Event();
                 // This synchronous mutation is serialized with local disable and mode generation.
+                pasteReady = false;
                 const int code = platform->Write(frame.body, tag);
                 canWrite = code == 0; statusPending = true;
                 if (code != 0) { status = "failed"; reason = "write_failed"; ErrorLocked(reason, code); }
@@ -243,6 +252,7 @@ struct ClipboardService::Impl {
                         appliedTag.clear(); appliedDigest.clear(); status = "stale"; reason = "local_revision_changed";
                     } else {
                     baseline = appliedRevision = writtenRevision; current = incoming;
+                    pasteRevision = writtenRevision; pasteReady = true;
                     appliedTag = tag; appliedDigest = digest; ++applied; status = "applied";
                     latest.reset(); error.clear(); errorCode = 0;
                     }
@@ -374,7 +384,7 @@ std::pair<std::string, std::string> ClipboardService::Paste(const std::string& e
         std::lock_guard<std::mutex> lock(s.mutex);
         return Clock::now() < deadline && generation == s.generation && s.bound && s.allowed &&
             (s.mode == 1 || s.mode == 3) && s.epoch == epoch && s.current.Event() == event &&
-            !s.appliedTag.empty() && !s.selfWritePending && s.platform->Revision() == s.appliedRevision && Clock::now() < deadline;
+            s.pasteReady && !s.selfWritePending && s.platform->Revision() == s.pasteRevision && Clock::now() < deadline;
     };
     if (!valid()) return {"stale", "clipboard_changed_or_disabled"};
     bool result = executor && executor(valid, deadline);
@@ -387,6 +397,9 @@ std::string ClipboardService::SnapshotJson() const
     out << "{\"allowed\":" << (s.allowed ? "true" : "false") << ",\"bound\":" << (s.bound ? "true" : "false")
         << ",\"mode\":" << s.mode << ",\"canRead\":" << (s.canRead ? "true" : "false") << ",\"canWrite\":" << (s.canWrite ? "true" : "false")
         << ",\"sent\":" << s.sent << ",\"received\":" << s.received << ",\"applied\":" << s.applied
+        << ",\"readTypeCount\":" << clipboard_text_policy::CappedCount(s.readShape.typeCount)
+        << ",\"readRecordCount\":" << clipboard_text_policy::CappedCount(s.readShape.recordCount)
+        << ",\"readCategory\":" << clipboard_wire::Quote(clipboard_text_policy::Category(s.readShape.rejection))
         << ",\"error\":" << clipboard_wire::Quote(s.error) << ",\"errorCode\":" << s.errorCode << "}"; return out.str();
 }
 uint16_t ClipboardService::Port() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->port; }

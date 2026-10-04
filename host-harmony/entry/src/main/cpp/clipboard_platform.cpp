@@ -19,19 +19,16 @@ public:
         const auto revision = OH_Pasteboard_GetChangeCount(board_.get());
         Owner<OH_UdmfData, OH_UdmfData_Destroy> data(OH_Pasteboard_GetData(board_.get(), &out.code), OH_UdmfData_Destroy);
         if (!data || out.code != 0) return out;
-        // A single rich-text item may offer a plain representation. Never convert files/images/URIs to text.
+        // Only read the explicit plain representation of one text record.
+        // Rich-text alternatives are retained locally and never parsed or sent.
         unsigned int count = 0;
         char** types = OH_UdmfData_GetTypes(data.get(), &count);
-        if (!types || count == 0 || count > 2) return out;
-        bool hasText = false;
-        for (unsigned int i = 0; i < count; ++i) {
-            if (!types[i]) return out;
-            if (std::strcmp(types[i], "general.plain-text") == 0) hasText = true;
-            else if (std::strcmp(types[i], "general.html") != 0) return out;
-        }
-        if (!hasText) return out;
         unsigned int records = 0;
-        if (!OH_UdmfData_GetRecords(data.get(), &records) || records != 1) return out;
+        auto items = OH_UdmfData_GetRecords(data.get(), &records);
+        out.shape.typeCount = clipboard_text_policy::CappedCount(count);
+        out.shape.recordCount = clipboard_text_policy::CappedCount(records);
+        out.shape.rejection = clipboard_text_policy::Check(types, count, items ? records : 0);
+        if (out.shape.rejection != clipboard_text_policy::Rejection::None) return out;
         Owner<OH_UdsPlainText, OH_UdsPlainText_Destroy> plain(OH_UdsPlainText_Create(), OH_UdsPlainText_Destroy);
         if (!plain) { out.code = 12900000; return out; }
         out.code = OH_UdmfData_GetPrimaryPlainText(data.get(), plain.get());
