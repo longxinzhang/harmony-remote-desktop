@@ -1,0 +1,589 @@
+{
+  "schemaVersion": 1,
+  "identity": "v0.5.0-session-modes pre-clipboard baseline",
+  "sourceCapturedAtUTC": "2026-10-04T13:44:10.910657+00:00",
+  "capturedSourceFileCount": 91,
+  "releaseSourceHashes": {
+    "client-macos/Sources/H264Decoder.swift": "34b07d0cd4faae8886695f68bcdd90da662bded300076a4414d1c48c7d1b525f",
+    "client-macos/Sources/HarmonyRemoteApp.swift": "09830c529a6857c47e19fd7da8f3f53a6e9a178eb7c24b7e07ad3a9b2cdedb32",
+    "client-macos/Sources/LANConnection.swift": "e05b798e35ce77ba286b4d939e5bcd84f2c979836cdc62cab06f76a21405f5ff",
+    "client-macos/Sources/RemoteInput.swift": "67358974f5f3d859f0248bb2018623ec905a239c072a9c6ed67f7636e8f8f301",
+    "client-macos/Sources/VideoSurface.swift": "42136ef50fb6b9df77b025bc2c196ac099744baa8f9a4776b05bfaeba60c3509",
+    "client-macos/Sources/ViewerModel.swift": "0ead45a9f97c1a149119fc726c033bc7dd97e706e5fa48290860de372a33f856",
+    "client-macos/Sources/WireProtocol.swift": "b668d26d5c318cb4ba94ef6d9c4efae432370904b35df63d87353a6dd6135ee9",
+    "host-harmony/entry/src/main/cpp/capture_probe.cpp": "a1ead6a6b1aa37b1e07a03b63f86ec0b0044767425ce766fec645d6f761905f0",
+    "host-harmony/entry/src/main/cpp/capture_probe.h": "6b40f603f37b9561e5edde3c666870c6c76c7c4f8e646c5c94aa149aee45ef53",
+    "host-harmony/entry/src/main/cpp/encoder_probe.cpp": "9351bc8b3253b051aeaf8dc085274df524bbaadf66bef58dc079b210b1cce45a",
+    "host-harmony/entry/src/main/cpp/encoder_probe.h": "0fec195b36eaeaf418b5e9a87c8bf9c513cefd33974926ce522e10b89149b8a4",
+    "host-harmony/entry/src/main/cpp/encoder_session_policy.h": "04665f610cb4ff837e0420bb01ac7f6a3eae433842707f60a5074bdbc269b859",
+    "host-harmony/entry/src/main/cpp/encoder_timing.h": "c4344529441a2c637216e6f3e2f49939deb2cdc4780b49dfd5c420e4c95cecf2",
+    "host-harmony/entry/src/main/cpp/input_event.h": "ccbf7a75903c2018905352dfc71222db879e0bea5fb46c4ef12659d8a5628f03",
+    "host-harmony/entry/src/main/cpp/input_probe.cpp": "cb6f83985946a42bf2a25d60c0498141da8f7b3051f37aabdcaee535394db0ab",
+    "host-harmony/entry/src/main/cpp/input_probe.h": "73d8d8a667f0739aabdf1e6eab249b087881a94f6eafce8bebe989d0a5bc95ec",
+    "host-harmony/entry/src/main/cpp/lan_server.cpp": "a46d46092dd6b5779ab0745bd2b70a3507399c552bb3ad462bbc99c9d73885e5",
+    "host-harmony/entry/src/main/cpp/lan_server.h": "858b3d6cac2552e6df8c621653c2723054b65d97cfca7efbdcc91ae50ed737c5",
+    "host-harmony/entry/src/main/cpp/napi_init.cpp": "9edba37421d5054d9219d5c33bf356184dbe73b35c09254005fca629282e08b5",
+    "host-harmony/entry/src/main/cpp/remote_input.cpp": "ae4689c323d6ca31f07d662805a56623d8d9067abe1c81f24b43575a0bf4b33a",
+    "host-harmony/entry/src/main/cpp/remote_input.h": "a72f7d3b3a92a0a18a58eed06b2c3cbf4636c4aea3c82077b668ec7ff90bab44",
+    "host-harmony/entry/src/main/ets/entryability/EntryAbility.ets": "873d694e7e053bea862068f18095d4bcb398132a839b6be04c0f658b9c7b279f",
+    "host-harmony/entry/src/main/ets/pages/Index.ets": "d0881c059b6442790827f9e595c78fc0b7a3d92087eb5c6d6176729ebb0f611c"
+  },
+  "capturedFiles": [
+    {
+      "path": ".gitignore",
+      "sha256": "aa0c21b045877c9ce535341928a9de57750b96a55118fb3e7f8d4f0890cac857",
+      "bytes": 164,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "CAPTURE_TEST_RESULT.md",
+      "sha256": "f2595d3ce39d9f68feaee9586200a45c763fac28357f360f972ce3d6d3049328",
+      "bytes": 3070,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "ENCODER_TEST_RESULT.md",
+      "sha256": "4bab2b4664943222703d9ed7560abac7c133c953ba825623bd45bcf9239faed3",
+      "bytes": 7394,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "INPUT_TEST_RESULT.md",
+      "sha256": "0825ca4a943c5661cc82eddba36560c69c6292dae10cba3f02bf7aa9e4b096d8",
+      "bytes": 9596,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "LAN_TEST_RESULT.md",
+      "sha256": "f2d74c505b09ba9c8fbebf52b9d5f32cb64e3e4291f029a8e70596855a0dac1f",
+      "bytes": 5756,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "MAC_VIEWER_TEST_RESULT.md",
+      "sha256": "019398f3b09fccd0bf4613b02375a153ab0a3b69c0fe19feb18a1cb46f76fa46",
+      "bytes": 8571,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "README.md",
+      "sha256": "d3b7b8bdd6e26699e9406d09595f6161d0a7ce446ab996f50649e52b68cd7f84",
+      "bytes": 19950,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "client-macos/README.md",
+      "sha256": "20dc0a04040bf678607443a9bfa7526baeced8d799a4f32921c964592c171d2c",
+      "bytes": 9125,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "client-macos/Resources/Info.plist",
+      "sha256": "cc5c651e7499378836953d1f314087af97e84afcbd37ee1946097fac9b382e04",
+      "bytes": 937,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "client-macos/Sources/H264Decoder.swift",
+      "sha256": "34b07d0cd4faae8886695f68bcdd90da662bded300076a4414d1c48c7d1b525f",
+      "bytes": 14305,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "client-macos/Sources/HarmonyRemoteApp.swift",
+      "sha256": "09830c529a6857c47e19fd7da8f3f53a6e9a178eb7c24b7e07ad3a9b2cdedb32",
+      "bytes": 5994,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "client-macos/Sources/LANConnection.swift",
+      "sha256": "e05b798e35ce77ba286b4d939e5bcd84f2c979836cdc62cab06f76a21405f5ff",
+      "bytes": 25311,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "client-macos/Sources/RemoteInput.swift",
+      "sha256": "67358974f5f3d859f0248bb2018623ec905a239c072a9c6ed67f7636e8f8f301",
+      "bytes": 10712,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "client-macos/Sources/VideoSurface.swift",
+      "sha256": "42136ef50fb6b9df77b025bc2c196ac099744baa8f9a4776b05bfaeba60c3509",
+      "bytes": 13490,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "client-macos/Sources/ViewerModel.swift",
+      "sha256": "0ead45a9f97c1a149119fc726c033bc7dd97e706e5fa48290860de372a33f856",
+      "bytes": 15035,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "client-macos/Sources/WireProtocol.swift",
+      "sha256": "b668d26d5c318cb4ba94ef6d9c4efae432370904b35df63d87353a6dd6135ee9",
+      "bytes": 14327,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "docs/ENVIRONMENT.md",
+      "sha256": "881f9dfe8d68b9063f30c5571c027443690878339ab53aeade7bb0f7b1dcea18",
+      "bytes": 3802,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/PROTOCOL.md",
+      "sha256": "bdbf408e2a4cedb6ca755c813abe61fd1ea805740e9ec392f4d95ac1b30d8bd0",
+      "bytes": 20600,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/REMOTE_CONTROL_ACCEPTANCE.md",
+      "sha256": "20d789319296500cd014b1af2c392743563d109ad60902276106c564a12aac44",
+      "bytes": 8745,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/SDK_CAPTURE_AUDIT.md",
+      "sha256": "c12b04b4cc4e3d2aafd28cc17c37e381fd2149c494eb800df7e6aef140fe7987",
+      "bytes": 8046,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/SDK_ENCODER_AUDIT.md",
+      "sha256": "a4c96963486853bd71e26b1d329d817522638f3b9e2acb8c532878b3dd9a9184",
+      "bytes": 6202,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/SDK_INPUT_AUDIT.md",
+      "sha256": "107cae1232f0ee12686b6e4a75f74720f5980881e2106a43dc7e0aab7ae99e70",
+      "bytes": 10249,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/SDK_REMOTE_INPUT_AUDIT.md",
+      "sha256": "4ae1a8932a3b658f41dcd37294b93d0196dc979c08367cd138c6ab51f92516f0",
+      "bytes": 9293,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "docs/TESTING.md",
+      "sha256": "476764c395a5cf7177f477a57678b74390de7f3ffd5b806d38e70b22fba097c5",
+      "bytes": 12619,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/.clang-tidy",
+      "sha256": "196d2e4e9e4cfcf3a81b07dba1e090e57b3bac870789da007a9399004651a584",
+      "bytes": 254,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/.clangd",
+      "sha256": "5ad874c734571cb66d678b0f56c151b3d9fb88550346ccf198742a151d76da96",
+      "bytes": 637,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/AppScope/app.json5",
+      "sha256": "443be1b130e876ea8a13cb66943b0edcea1c89521d1520cbaeca1f9bca27808c",
+      "bytes": 216,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/AppScope/resources/base/element/string.json",
+      "sha256": "3d4e19bd8e7c27d655694e9d5398fb116db732a12bc455dfd2229ebf50480fd6",
+      "bytes": 64,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/AppScope/resources/base/media/app_icon.svg",
+      "sha256": "55bad89d20643bc760627533c8d183f1b7eb0ef9375cd3bbee888a4300bfb844",
+      "bytes": 334,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/hvigorfile.ts",
+      "sha256": "f547983dcab9c8fff87cc3ddedb22bb98063663c5b8afe18bb32e131311ec289",
+      "bytes": 103,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/oh-package-lock.json5",
+      "sha256": "a4f1ef2ea02014a7d388b8f3e6f66dbfef57871be4169d94883472eb5d06c1ae",
+      "bytes": 538,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/oh-package.json5",
+      "sha256": "d5f603b101d6888dafd7dfa1206c215a61ca70758f3c4eb08db60a17a22f946f",
+      "bytes": 165,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/CMakeLists.txt",
+      "sha256": "f3a659a2e2b0735543165dcefe00ce49f54c4185794b935a3a1e3431d0a2ecc7",
+      "bytes": 595,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/capture_probe.cpp",
+      "sha256": "a1ead6a6b1aa37b1e07a03b63f86ec0b0044767425ce766fec645d6f761905f0",
+      "bytes": 27172,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/capture_probe.h",
+      "sha256": "6b40f603f37b9561e5edde3c666870c6c76c7c4f8e646c5c94aa149aee45ef53",
+      "bytes": 738,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_probe.cpp",
+      "sha256": "9351bc8b3253b051aeaf8dc085274df524bbaadf66bef58dc079b210b1cce45a",
+      "bytes": 50861,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_probe.h",
+      "sha256": "0fec195b36eaeaf418b5e9a87c8bf9c513cefd33974926ce522e10b89149b8a4",
+      "bytes": 1575,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_session_policy.h",
+      "sha256": "04665f610cb4ff837e0420bb01ac7f6a3eae433842707f60a5074bdbc269b859",
+      "bytes": 972,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_timing.h",
+      "sha256": "c4344529441a2c637216e6f3e2f49939deb2cdc4780b49dfd5c420e4c95cecf2",
+      "bytes": 4287,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/input_event.h",
+      "sha256": "ccbf7a75903c2018905352dfc71222db879e0bea5fb46c4ef12659d8a5628f03",
+      "bytes": 353,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/input_probe.cpp",
+      "sha256": "cb6f83985946a42bf2a25d60c0498141da8f7b3051f37aabdcaee535394db0ab",
+      "bytes": 13933,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/input_probe.h",
+      "sha256": "73d8d8a667f0739aabdf1e6eab249b087881a94f6eafce8bebe989d0a5bc95ec",
+      "bytes": 2935,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/lan_server.cpp",
+      "sha256": "a46d46092dd6b5779ab0745bd2b70a3507399c552bb3ad462bbc99c9d73885e5",
+      "bytes": 46145,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/lan_server.h",
+      "sha256": "858b3d6cac2552e6df8c621653c2723054b65d97cfca7efbdcc91ae50ed737c5",
+      "bytes": 2146,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/napi_init.cpp",
+      "sha256": "9edba37421d5054d9219d5c33bf356184dbe73b35c09254005fca629282e08b5",
+      "bytes": 10998,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/remote_input.cpp",
+      "sha256": "ae4689c323d6ca31f07d662805a56623d8d9067abe1c81f24b43575a0bf4b33a",
+      "bytes": 24074,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/remote_input.h",
+      "sha256": "a72f7d3b3a92a0a18a58eed06b2c3cbf4636c4aea3c82077b668ec7ff90bab44",
+      "bytes": 932,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/types/libhrd_probe/index.d.ts",
+      "sha256": "c17dd9eb9456042d9a73ed8b191ec61aed68ca5adae09d67bd389726479cb3b1",
+      "bytes": 990,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/types/libhrd_probe/oh-package.json5",
+      "sha256": "a16cc5404fc3558c1b4bb2b8a2acdf24e05e4b586735c9c0bff20fdb0fff9152",
+      "bytes": 68,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/ets/entryability/EntryAbility.ets",
+      "sha256": "873d694e7e053bea862068f18095d4bcb398132a839b6be04c0f658b9c7b279f",
+      "bytes": 740,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/ets/pages/Index.ets",
+      "sha256": "d0881c059b6442790827f9e595c78fc0b7a3d92087eb5c6d6176729ebb0f611c",
+      "bytes": 19658,
+      "releaseSourceHashMatch": true
+    },
+    {
+      "path": "host-harmony/entry/src/main/module.json5",
+      "sha256": "8ed2e5a7959f6e0586c3f2fd4140d2f9eb847031e75183ddb191713bd63b5e2c",
+      "bytes": 792,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/resources/base/element/color.json",
+      "sha256": "93a6ea9182c9da9151568b3325f906b5ef96b9b73fb373fe158e27f1e99f37f7",
+      "bytes": 65,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/resources/base/element/string.json",
+      "sha256": "78d3c840050e7e1c7e255f049a9e6d0dd98d1752d6c4ed20671feed6e8bd6c08",
+      "bytes": 103,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/entry/src/main/resources/base/profile/main_pages.json",
+      "sha256": "621d1c271cf89755a64364b8e70c65745d9049ebaf18efa3eba95a2ae0b4558d",
+      "bytes": 24,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/hvigor/hvigor-config.json5",
+      "sha256": "136523b5d2afe5ea2610cdd408d811ad68c1d7f446b1f04d72ed726198b5da95",
+      "bytes": 128,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/hvigorfile.ts",
+      "sha256": "2378c5e0c5246005ada73a67e8c9834fa08adb9ffd6fb6c219051456753bed5a",
+      "bytes": 103,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "host-harmony/oh-package.json5",
+      "sha256": "c903845d08eadd28f7c4243dcc770e2c36a24ab041d2c3737700cf9edc11ab85",
+      "bytes": 208,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/audit-environment.py",
+      "sha256": "deed0ede544c9b3aacbb0d4d5aca352af96e8e4d7a4cf1c6e22833b5db1573c3",
+      "bytes": 4774,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/build-hap.sh",
+      "sha256": "8795bf8eef0484f6680a2135e682d52271a3dffc92d577f7796608c28f4462d0",
+      "bytes": 1428,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/build-mac.sh",
+      "sha256": "2e9238177590f4b844a77522e99d8634cfc69791683686600a3b08947327d78b",
+      "bytes": 1359,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/collect-diagnostics.py",
+      "sha256": "7df3ef618f36f4259b705ae2418b9c5f14303386980a5818f18de021436e2a6d",
+      "bytes": 7323,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/collect-encoder.py",
+      "sha256": "e0c5fdf584d878ca8d182823db806c96d95b8e73a3bba06a880e870cec485699",
+      "bytes": 6050,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/collect-lan.py",
+      "sha256": "658581345097c6d450f29d4fa8a27a87c7f990ff0f6eaaf5766ca8b7a280a9d3",
+      "bytes": 6060,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/device-check.py",
+      "sha256": "57d982c9f932ca421f651d1764b5cc6afb541423d4c91d688a347d190ff65829",
+      "bytes": 1161,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/install-hap.py",
+      "sha256": "3370d2efa0c1568d4e1dbf0818843160d45897bd1413eecaaef2335869197119",
+      "bytes": 3493,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/lan-receiver.py",
+      "sha256": "00f830c3a3b6a90fc8ac6c9874832236cacf6992203a44bd7d428fa117f50bd8",
+      "bytes": 23971,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/make-mac-replay.py",
+      "sha256": "f65f963cb4cf2614fc191d7c3fb28613814de51dcb74fb53abea258540065df8",
+      "bytes": 3654,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/probe_tools.py",
+      "sha256": "b9ac10a90594c0e4dedf36c0a6670a6c22a2c75ba8ff5ff3730bc68c10224eb7",
+      "bytes": 2247,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-encoder-session.sh",
+      "sha256": "bb1c0a3a9c750d69343af1e07550176e991841bc4f67d6e6809db43bec923647",
+      "bytes": 481,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-encoder-timing.sh",
+      "sha256": "84db590a4687d952c8b52143d29803fc9f6a6c7914b2ac5108b10c9ec7fe4cc5",
+      "bytes": 484,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-input.sh",
+      "sha256": "e37cb604fce1b70f6076a093744c6cead3d0cab0f6fe6e0defc4c2d51195de3d",
+      "bytes": 560,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-lan-server.sh",
+      "sha256": "be66e05d3c8082592866aa9a16ff15aea906b09f91473aba4de0f55632eae905",
+      "bytes": 820,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-mac-decoder.sh",
+      "sha256": "fb7a9a5cf46c39140cde830c71c620c1b737b0931fa3594fe20d054a3bbd3b80",
+      "bytes": 750,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-mac-input.sh",
+      "sha256": "65cb153f8f1b86689ba0b2105005ffebe88f984f8d85f3ebdc87302a5875d3f2",
+      "bytes": 509,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-mac-network.sh",
+      "sha256": "95cae7def17f4370e61641a289bb45bda5152a0114d7f9d529a86ace8335e8c7",
+      "bytes": 919,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/test-remote-input.sh",
+      "sha256": "fa87eb1e4bfdb01aa155637816a500414a0dad0dd4a17534a0fb4986673343b2",
+      "bytes": 630,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "scripts/validate-h264.py",
+      "sha256": "3a486db18aaec55a63615c48b755363dd3197e0a8294eb8de3977f9ee29c8b93",
+      "bytes": 11005,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/encoder_session_test.cpp",
+      "sha256": "df4c30b33234f705d13a6587a2d93cca4cdcc2de7606973f7bae176cdd7c3b72",
+      "bytes": 2456,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/encoder_timing_test.cpp",
+      "sha256": "c7b14ec6a4875a9db38f3ddac3c6a3a1a8e2d61ffa0a2aa0d986ef143c5d8495",
+      "bytes": 5058,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/input_probe_test.cpp",
+      "sha256": "0332b8a4c1e50dcbaadc62c4913200874bb0f5c03e9f5a16a25988cd61d53d1f",
+      "bytes": 20599,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/lan_server_test.cpp",
+      "sha256": "c48cf85fb6fdaa06d384b5e168e1d806c0443d74300b355d8d197902dd7c5da0",
+      "bytes": 34466,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/mac_decoder_test.swift",
+      "sha256": "f905856557da1e31e332b21a1ab93ebeb1ad26ad6b9ca45bdd24e9bc7f93ebc8",
+      "bytes": 4609,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/mac_input_test.swift",
+      "sha256": "af4e0bc731d721245ce179ca5624dc3f5fbec8449554fbe92f75fb26d13ee42e",
+      "bytes": 11551,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/mac_network_test.swift",
+      "sha256": "902337e58bb2bcf541f9a83200e944d6495d8553041f8e65aaa3ee5f803a1399",
+      "bytes": 26446,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/remote-input-stubs/multimodalinput/oh_input_manager.h",
+      "sha256": "faaa11a1b1a101ca95a1ed3e6302733f7867c8d70c138dbb5ea4cd1d7e5647d6",
+      "bytes": 3756,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/remote-input-stubs/window_manager/oh_display_manager.h",
+      "sha256": "e1b0f684564784c92a95a5d476ffbc41712ec2a38e4c8e527289cc5f6b1af589",
+      "bytes": 848,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/remote_input_test.cpp",
+      "sha256": "4f02f94b46ca41a6174b1ce1e05c01bce4ae877c6d265a39e28104a1b4472622",
+      "bytes": 30975,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/stubs/multimodalinput/oh_input_manager.h",
+      "sha256": "310c035fa3a79c34cf3333cf63245511af547e056ed51f51d20a888b28c5ce04",
+      "bytes": 2293,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/stubs/window_manager/oh_display_manager.h",
+      "sha256": "73f91d42a882c5f91425f15f5121bdd6dfdc9494a34b80c855ac61985614e84b",
+      "bytes": 545,
+      "releaseSourceHashMatch": null
+    },
+    {
+      "path": "tests/test_lan_receiver.py",
+      "sha256": "c33b9f6513e5410a48e851d31329818233d56a9d69c9ecf8f1ffab6df0f6f458",
+      "bytes": 20593,
+      "releaseSourceHashMatch": null
+    }
+  ],
+  "packagingAdditions": [
+    ".gitignore",
+    "host-harmony/build-profile.template.json5",
+    "host-harmony/entry/build-profile.template.json5",
+    "scripts/init-local-config.py",
+    "docs/VERSION_HISTORY.md",
+    "versions/"
+  ],
+  "exclusions": "Generated output, dependencies, artifacts, signing keys/certificates, every build-profile.json5 and local credentials are excluded; safe signing-free build-profile template must be supplied separately. Native .cxx compiler cache is excluded.",
+  "verificationBoundary": "All 23 application-source SHA values match the pre-clipboard build verification. Signing-free templates are packaging additions; this Git import does not rerun the historical signed build."
+}

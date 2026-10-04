@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "version": "0.4.0",
+  "status": "PARTIAL_VERIFIED_SOURCES_NOT_A_RELEASE_CHECKOUT",
+  "evidence": "Original local build-verification-0.4.0.json source hashes; matched bytes preserved here or referenced from the session-modes baseline Git tag.",
+  "recordedSourceCount": 32,
+  "verifiedAvailableSourceCount": 23,
+  "missingSourceCount": 9,
+  "completeSourceRelease": false,
+  "buildableReleaseClaim": false,
+  "files": [
+    {
+      "path": "client-macos/Sources/H264Decoder.swift",
+      "sha256": "34b07d0cd4faae8886695f68bcdd90da662bded300076a4414d1c48c7d1b525f",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "client-macos/Sources/H264Decoder.swift"
+    },
+    {
+      "path": "client-macos/Sources/HarmonyRemoteApp.swift",
+      "sha256": "09830c529a6857c47e19fd7da8f3f53a6e9a178eb7c24b7e07ad3a9b2cdedb32",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "client-macos/Sources/HarmonyRemoteApp.swift"
+    },
+    {
+      "path": "client-macos/Sources/RemoteInput.swift",
+      "sha256": "67358974f5f3d859f0248bb2018623ec905a239c072a9c6ed67f7636e8f8f301",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "client-macos/Sources/RemoteInput.swift"
+    },
+    {
+      "path": "client-macos/Sources/VideoSurface.swift",
+      "sha256": "42136ef50fb6b9df77b025bc2c196ac099744baa8f9a4776b05bfaeba60c3509",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "client-macos/Sources/VideoSurface.swift"
+    },
+    {
+      "path": "client-macos/Sources/ViewerModel.swift",
+      "sha256": "91988193cd835c5113aac3b6ec888cb373e7f805b1b72a2ec1a49e937a61b539",
+      "storage": "snapshot_file",
+      "snapshotPath": "files/client-macos/Sources/ViewerModel.swift"
+    },
+    {
+      "path": "client-macos/Sources/WireProtocol.swift",
+      "sha256": "17201fe5d899f7415e40d7b310933bf98cc70d1a7707512f39d848d5d2c60f87",
+      "storage": "snapshot_file",
+      "snapshotPath": "files/client-macos/Sources/WireProtocol.swift"
+    },
+    {
+      "path": "host-harmony/AppScope/resources/base/element/string.json",
+      "sha256": "3d4e19bd8e7c27d655694e9d5398fb116db732a12bc455dfd2229ebf50480fd6",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/AppScope/resources/base/element/string.json"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/CMakeLists.txt",
+      "sha256": "f3a659a2e2b0735543165dcefe00ce49f54c4185794b935a3a1e3431d0a2ecc7",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/CMakeLists.txt"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/capture_probe.cpp",
+      "sha256": "a1ead6a6b1aa37b1e07a03b63f86ec0b0044767425ce766fec645d6f761905f0",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/capture_probe.cpp"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/capture_probe.h",
+      "sha256": "6b40f603f37b9561e5edde3c666870c6c76c7c4f8e646c5c94aa149aee45ef53",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/capture_probe.h"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_timing.h",
+      "sha256": "c4344529441a2c637216e6f3e2f49939deb2cdc4780b49dfd5c420e4c95cecf2",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/encoder_timing.h"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/input_event.h",
+      "sha256": "ccbf7a75903c2018905352dfc71222db879e0bea5fb46c4ef12659d8a5628f03",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/input_event.h"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/input_probe.cpp",
+      "sha256": "cb6f83985946a42bf2a25d60c0498141da8f7b3051f37aabdcaee535394db0ab",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/input_probe.cpp"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/input_probe.h",
+      "sha256": "73d8d8a667f0739aabdf1e6eab249b087881a94f6eafce8bebe989d0a5bc95ec",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/input_probe.h"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/lan_server.cpp",
+      "sha256": "a46d46092dd6b5779ab0745bd2b70a3507399c552bb3ad462bbc99c9d73885e5",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/lan_server.cpp"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/lan_server.h",
+      "sha256": "858b3d6cac2552e6df8c621653c2723054b65d97cfca7efbdcc91ae50ed737c5",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/lan_server.h"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/remote_input.h",
+      "sha256": "a72f7d3b3a92a0a18a58eed06b2c3cbf4636c4aea3c82077b668ec7ff90bab44",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/remote_input.h"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/types/libhrd_probe/index.d.ts",
+      "sha256": "c17dd9eb9456042d9a73ed8b191ec61aed68ca5adae09d67bd389726479cb3b1",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/types/libhrd_probe/index.d.ts"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/types/libhrd_probe/oh-package.json5",
+      "sha256": "a16cc5404fc3558c1b4bb2b8a2acdf24e05e4b586735c9c0bff20fdb0fff9152",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/cpp/types/libhrd_probe/oh-package.json5"
+    },
+    {
+      "path": "host-harmony/entry/src/main/module.json5",
+      "sha256": "8ed2e5a7959f6e0586c3f2fd4140d2f9eb847031e75183ddb191713bd63b5e2c",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/module.json5"
+    },
+    {
+      "path": "host-harmony/entry/src/main/resources/base/element/color.json",
+      "sha256": "93a6ea9182c9da9151568b3325f906b5ef96b9b73fb373fe158e27f1e99f37f7",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/resources/base/element/color.json"
+    },
+    {
+      "path": "host-harmony/entry/src/main/resources/base/element/string.json",
+      "sha256": "78d3c840050e7e1c7e255f049a9e6d0dd98d1752d6c4ed20671feed6e8bd6c08",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/resources/base/element/string.json"
+    },
+    {
+      "path": "host-harmony/entry/src/main/resources/base/profile/main_pages.json",
+      "sha256": "621d1c271cf89755a64364b8e70c65745d9049ebaf18efa3eba95a2ae0b4558d",
+      "storage": "baseline_git_reference",
+      "baselineRef": "v0.5.0-session-modes",
+      "baselinePath": "host-harmony/entry/src/main/resources/base/profile/main_pages.json"
+    }
+  ],
+  "missingFiles": [
+    {
+      "path": "client-macos/Resources/Info.plist",
+      "expectedSHA256": "d8a23615445c3244caf4ea7e16725dbd90686b4d55902cea0c9933cabf27c1ae"
+    },
+    {
+      "path": "client-macos/Sources/LANConnection.swift",
+      "expectedSHA256": "4ee11ced0e246b29ebf1d8970656a40a39fbec131a0c733963322918d73381bb"
+    },
+    {
+      "path": "host-harmony/AppScope/app.json5",
+      "expectedSHA256": "bf830def1da2fa123d51e4d0d05eb4331ad59c9f799d977b3466e40f955474b3"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_probe.cpp",
+      "expectedSHA256": "5fa4f02ae24a3d7c73f6498c4cd840278295bef1b445b587d2133c37f88d363e"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/encoder_probe.h",
+      "expectedSHA256": "73bb23a8f86f9bc487b80e251d808f18ff760eeb82fae9c11633505178cf6ee6"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/napi_init.cpp",
+      "expectedSHA256": "9fbcb3d58151e37aea177cd3b80e9ea18942ed68cd53ef7274b546edc5418657"
+    },
+    {
+      "path": "host-harmony/entry/src/main/cpp/remote_input.cpp",
+      "expectedSHA256": "5aa7613d672c991a1c5b73061fbe1ffb7ef3f44c22d0c3b79edc61e916c28674"
+    },
+    {
+      "path": "host-harmony/entry/src/main/ets/entryability/EntryAbility.ets",
+      "expectedSHA256": "79238cdf37650f50d44160b503b9b290e652d77fd77260fb8e3b2731756ec00a"
+    },
+    {
+      "path": "host-harmony/entry/src/main/ets/pages/Index.ets",
+      "expectedSHA256": "5e95e19f8bbe52c7dfff3001415517a80823b6ba1d27c38392c3a2ce08b96151"
+    }
+  ],
+  "limitations": [
+    "The original build manifest did not enumerate every project file. Even all recorded hashes matching would not alone prove a complete historical checkout.",
+    "No release source tag is created for this incomplete version.",
+    "Do not fill missing files from newer code and label the result as the historical release."
+  ]
+}

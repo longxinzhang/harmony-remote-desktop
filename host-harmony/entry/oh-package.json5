@@ -1,0 +1,6 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "HRD Phase 0 probe",
+  "dependencies": { "libhrd_probe.so": "file:./src/main/cpp/types/libhrd_probe" }
+}

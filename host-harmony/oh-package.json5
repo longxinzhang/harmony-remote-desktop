@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "harmony-remote-probe",
+  "version": "1.0.0",
+  "description": "API 26 PC screen capture and input authorization probe",
+  "dependencies": {},
+  "devDependencies": {}
+}

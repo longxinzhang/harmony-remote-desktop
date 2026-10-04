@@ -1,0 +1,57 @@
+# Local build output and dependencies
+**/.hvigor/
+**/.cxx/
+**/build/
+**/oh_modules/
+**/node_modules/
+**/__pycache__/
+*.py[cod]
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+
+# Device exports, binaries, diagnostic logs and private source baselines
+/artifacts/
+*.hap
+*.hsp
+*.app/
+*.zip
+*.h264
+*.hrd
+*.ppm
+*.log
+
+# Machine configuration and IDE state
+**/local.properties
+**/.idea/
+**/.vscode/
+**/.DS_Store
+
+# Actual build profiles are local: use the signing-free *.template.json5 files.
+**/build-profile.json5
+**/signing-config*.json*
+**/signing.properties
+**/.ohpmrc
+**/.npmrc
+**/.netrc
+**/.env
+**/.env.*
+!**/.env.example
+
+# Signing material must never be committed, including alternate key formats.
+**/keys/
+**/certificates/
+**/credentials/
+*.p12
+*.pfx
+*.p7b
+*.pem
+*.key
+*.cer
+*.crt
+*.csr
+*.der
+*.jks
+*.keystore
