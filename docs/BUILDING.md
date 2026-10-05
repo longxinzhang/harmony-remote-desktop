@@ -1,6 +1,6 @@
 # 构建与安装
 
-当前主线为产品版本 **0.6.0**，Host build **1000013** / Mac build **9**。它是开发预览版，尚无公开的通用安装包；仓库中的历史标签对应各自的源码版本，不代表当前主线已完成全部功能验收。
+当前主线为产品版本 **0.6.0**，Host build **1000013** / Mac build **9**。[Preview 1](https://github.com/longxinzhang/harmony-remote-desktop/releases/tag/v0.6.0-preview.1) 提供 Mac ZIP 与需要自行签名的 unsigned HAP；用户安装及授权说明见 [INSTALL.md](INSTALL.md)。鸿蒙通用直装版尚未提供，预览版与历史标签均不代表所有功能已完成真机验收。
 
 ## 开发环境
 

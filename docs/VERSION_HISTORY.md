@@ -2,6 +2,12 @@
 
 The intended repository name is `harmony-remote-desktop`. This document separates preserved source from build and device evidence. A binary archive or a list of hashes cannot reconstruct missing source.
 
+## 0.6.0-preview.1 public download preview
+
+The first public binary preview uses tag `v0.6.0-preview.1`, product version 0.6.0, Host build `1000013` and Mac build `9`. It packages the current window-scoped privacy mask implementation and product interface without changing the existing application source or older tags. The public assets are an ad-hoc-signed Apple Silicon Mac ZIP, an **unsigned developer HAP that requires the recipient's own signing setup**, installation and release notes, a manifest and SHA-256 checksums. The device-bound signed development HAP and all private signing material remain local.
+
+The publication scope and remaining device acceptance items are recorded in the [release notes](releases/v0.6.0-preview.1.md) and [installation guide](INSTALL.md). Mac Developer ID/notarization, a generally installable Harmony distribution, and full 60 FPS/audio/reconnect/reboot/long-session acceptance remain open. Downloadable artifacts must not be confused with a fully accepted stable release.
+
 ## 0.6.0 Host version-display correction
 
 A follow-up on `main` increments the Host to build `1000012`, keeping product version 0.6.0 and Mac build 8. Two visible Host labels incorrectly retained the literal 0.5.0 while the installed package was already 0.6.0. Both labels and the diagnostic version/build now read `bundleManager.getBundleInfoForSelfSync(GET_BUNDLE_INFO_DEFAULT)`, making the installed package the shared source.

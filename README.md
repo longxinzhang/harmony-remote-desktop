@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/harmony-remote.svg" alt="Harmony Remote 图标" width="80" height="80">
+  <img src="docs/images/harmony-remote-logo.webp" alt="Harmony Remote Desktop 品牌 Logo：连接的电脑与笔记本" width="320">
 </p>
 
 <h1 align="center">Harmony Remote</h1>
@@ -18,6 +18,7 @@
 
 <p align="center">
   <a href="#preview">产品预览</a> ·
+  <a href="https://github.com/longxinzhang/harmony-remote-desktop/releases/tag/v0.6.0-preview.1">下载预览版</a> ·
   <a href="#progress">当前进展</a> ·
   <a href="#getting-started">开始使用</a> ·
   <a href="#roadmap">接下来</a> ·
@@ -30,7 +31,9 @@
   “任意设备”是产品愿景；Windows、Linux、移动端与浏览器控制端尚未推出。
 </p>
 
-![在 Mac 的 Harmony Remote 中操作鸿蒙桌面、浏览器和其他应用](docs/images/remote-desktop.webp)
+**产品愿景图** · 图中的移动端、Windows / Web / Linux、公网网关与中继、文件传输、图片剪贴板、多屏等能力属于后续方向；当前可用范围见上方说明与下方进展表。
+
+![Harmony Remote 产品愿景：让更多设备连接鸿蒙电脑，图中包含尚未上线的跨平台与跨网络能力](docs/images/harmony-remote-vision.webp)
 
 ## 让鸿蒙电脑融入你的工作流
 
@@ -46,7 +49,9 @@
 
 ## 产品预览
 
-以下四张图片来自实际运行的 **0.6.0**，包含首屏大图。图片可点击查看；状态栏数值只是截图时的瞬时状态。
+以下四张图片来自实际运行的 **0.6.0**。图片可点击查看；状态栏数值只是截图时的瞬时状态。
+
+![在 Mac 的 Harmony Remote 中操作鸿蒙桌面、浏览器和其他应用](docs/images/remote-desktop.webp)
 
 <table>
   <tr>
@@ -100,7 +105,14 @@
 
 ## 开始使用
 
-目前通过源码构建体验，**尚未发布可直接下载的通用安装包**。鸿蒙端需要为自己的设备配置签名，Mac 构建面向 Apple Silicon。完整步骤见 [构建与安装](docs/BUILDING.md)。
+[**下载 0.6.0 Preview 1**](https://github.com/longxinzhang/harmony-remote-desktop/releases/tag/v0.6.0-preview.1) · [安装、授权与已知问题](docs/INSTALL.md)
+
+| 下载 | 安装方式 |
+| --- | --- |
+| **Mac ZIP** | Apple Silicon / macOS 14+，解压后将 App 移到“应用程序”；尚未做 Apple 公证，首次打开可能需要系统确认 |
+| **鸿蒙 unsigned HAP** | **仅供开发者自行签名，不能直接安装**；需要自己的设备签名与剪贴板 ACL。面向普通用户的鸿蒙直装版仍待正式分发流程 |
+
+发布附件包含安装说明、权限用途、已知问题与 SHA-256 校验值。需要自行构建或为鸿蒙设备签名时，见 [构建与安装](docs/BUILDING.md)。
 
 装好两端后：
 
@@ -139,7 +151,7 @@ Harmony Remote 自行定义并实现应用层消息格式与会话流程，分�
 | --- | --- |
 | **把当前体验做稳** | 完成剪贴板应用兼容性回归、真实断网与重启配对、60 FPS / 音频 / 启动验证，以及 8～24 小时资源与恢复测试 |
 | **把文件带过去** | 双向文件传输、进度与取消、失败恢复，再扩展文件复制粘贴与拖放；不把系统内的文件拖动等同于跨设备传输 |
-| **让连接更完整** | 加密传输、设备发现、连接状态与错误提示、经过验证的发行安装包与更新流程 |
+| **让连接更完整** | 加密传输、设备发现、连接状态与错误提示、鸿蒙正式分发、Mac 公证与更新流程 |
 | **走向更多设备** | 探索 Windows / Linux 控制端，再评估移动端与浏览器；跨公网访问在加密与认证完善之后推进 |
 
 ## 开发与反馈
@@ -148,6 +160,7 @@ Harmony Remote 自行定义并实现应用层消息格式与会话流程，分�
 
 | 文档 | 内容 |
 | --- | --- |
+| [安装、授权与已知问题](docs/INSTALL.md) | 预览版下载、用户操作、鸿蒙权限含义与当前限制 |
 | [构建与安装](docs/BUILDING.md) | 开发环境、源码构建、签名与首次连接 |
 | [测试入口](docs/TESTING.md) | 录屏、输入与真机验证流程 |
 | [会话可靠性](docs/SESSION_RELIABILITY.md) | 配对、撤销、重连与释放机制 |
