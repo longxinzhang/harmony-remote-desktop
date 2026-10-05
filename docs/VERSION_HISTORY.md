@@ -2,6 +2,12 @@
 
 The intended repository name is `harmony-remote-desktop`. This document separates preserved source from build and device evidence. A binary archive or a list of hashes cannot reconstruct missing source.
 
+## 0.6.0 Host version-display correction
+
+A follow-up on `main` increments the Host to build `1000012`, keeping product version 0.6.0 and Mac build 8. Two visible Host labels incorrectly retained the literal 0.5.0 while the installed package was already 0.6.0. Both labels and the diagnostic version/build now read `bundleManager.getBundleInfoForSelfSync(GET_BUNDLE_INFO_DEFAULT)`, making the installed package the shared source.
+
+The corrected HAP built and passed installation signature verification. It was installed and launched through DevEco on 2026-10-05; both the device package query and the new startup diagnostic reported 0.6.0 / 1000012. Device screen mirroring was unavailable, so this is package and runtime-query evidence, not a screenshot check or full feature acceptance. The record is local `artifacts/host-version-display-fix-1000012.json`, and the signed HAP is archived under `artifacts/releases/0.6.0-host-version-fix/`. The original `v0.6.0-rc.1` tag is unchanged.
+
 ## 0.6.0-rc.1 development candidate
 
 The current candidate label is `v0.6.0-rc.1`, product version 0.6.0, Host build `1000011` and Mac build `8`. It adds six capabilities on top of the preserved 0.5.0 UI and clipboard repair:

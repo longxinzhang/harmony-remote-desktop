@@ -1,7 +1,7 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import probe from 'libhrd_probe.so';
 import { deviceInfo } from '@kit.BasicServicesKit';
-import { common } from '@kit.AbilityKit';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ClipboardPermission } from '../services/ClipboardPermission';
 import { StartupService, StartupState } from '../services/StartupService';
@@ -111,6 +111,8 @@ struct Index {
   @State lanFrames: number = 0;
   @State lanError: string = '';
   @State currentPage: string = 'remote';
+  @State appVersion: string = '—';
+  @State appBuild: number = 0;
   @State operationDetail: string = '尚未执行操作';
   @State clipboardText: string = '{}';
   @State clipboardError: boolean = false;
@@ -150,6 +152,7 @@ struct Index {
   private lanStateSnapshot: string = '';
 
   aboutToAppear(): void {
+    this.readAppVersion();
     if (this.sessionMode !== 'debug' && this.sessionMode !== 'permanent') {
       this.sessionMode = 'permanent';
     }
@@ -351,10 +354,21 @@ struct Index {
     this.refresh();
   }
 
+  private readAppVersion(): void {
+    try {
+      const info = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      this.appVersion = info.versionName;
+      this.appBuild = info.versionCode;
+    } catch (error) {
+      const businessError = error as BusinessError;
+      hilog.warn(0x0000, 'HRD', 'App version query failed %{public}d', businessError.code);
+    }
+  }
+
   private persistDiagnostics(): void {
     const device: DeviceSnapshot = {
-      appVersion: '0.6.0',
-      appBuild: 1000011,
+      appVersion: this.appVersion,
+      appBuild: this.appBuild,
       sessionMode: this.sessionMode,
       deviceType: deviceInfo.deviceType,
       osFullName: deviceInfo.osFullName,
@@ -516,7 +530,7 @@ struct Index {
           Circle().width(7).height(7).fill(this.lanRunning ? '#27A27B' : '#A6B1BF')
           Text(this.lanRunning ? '本机服务在线' : '本机服务未上线').fontSize(12).fontColor('#64748B')
         }
-        Text('v0.5.0 · 局域网连接').fontSize(11).fontColor('#93A0B2')
+        Text(`v${this.appVersion} · 局域网连接`).fontSize(11).fontColor('#93A0B2')
       }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 16, bottom: 16, top: 16 })
     }.width(184).height('100%').padding({ left: 12, right: 12, top: 16, bottom: 12 })
       .backgroundColor('#FFFFFF').border({ width: { right: 1 }, color: '#E5EAF1' })
@@ -868,7 +882,7 @@ struct Index {
       }.alignItems(HorizontalAlign.Start).width('100%').padding(22).backgroundColor('#FFFFFF').borderRadius(12)
       Column({ space: 14 }) {
         this.cardHeading('运行诊断', '仅用于故障排查；不包含剪贴板正文。')
-        Text(`版本 0.5.0 · API ${deviceInfo.sdkApiVersion} · ${deviceInfo.deviceType} · SDK 26.0.0.105`)
+        Text(`版本 ${this.appVersion} · Build ${this.appBuild} · API ${deviceInfo.sdkApiVersion} · ${deviceInfo.deviceType} · SDK 26.0.0.105`)
           .fontSize(12).fontColor('#647B99')
         Text(`LAN ${this.lanStatus} · 已发送 ${this.lanFrames} 帧 · 输入返回码 ${this.remoteError} · 待释放 ${this.remotePending}`)
           .fontSize(12).fontColor('#647B99')
