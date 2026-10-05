@@ -9,6 +9,7 @@ export default class EntryAbility extends UIAbility {
     PersistentStorage.persistProp<boolean>('hrdStartServerOnLaunch', false);
     PersistentStorage.persistProp<number>('hrdFrameRate', 30);
     PersistentStorage.persistProp<boolean>('hrdCaptureAudio', false);
+    PersistentStorage.persistProp<number>('hrdPrivacyMaskMode', 1);
     probe.configurePairing(this.context.filesDir);
     AppStorage.setOrCreate('probeFilesDir', this.context.filesDir);
     windowStage.loadContent('pages/Index', (error) => {

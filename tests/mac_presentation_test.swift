@@ -48,6 +48,10 @@ struct PresentationTests {
         guard CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_32BGRA, nil, &pixels) == kCVReturnSuccess,
               let pixels else { fatalError("cannot allocate test pixels") }
         let mailbox = FrameMailbox()
+        check(mailbox.statistics.lastSubmittedFrameAt == nil, "unused mailbox does not claim a display submission")
+        mailbox.displayed(error: "synthetic diagnostic failure")
+        check(mailbox.statistics.lastSubmittedFrameAt == nil && mailbox.statistics.submitted == 0,
+              "display failure cannot create a successful submission timestamp")
         var notices = 0
         mailbox.observePendingFrames { notices += 1 }
         mailbox.put(pixels, ptsUs: 1); mailbox.put(pixels, ptsUs: 2)
@@ -71,6 +75,8 @@ struct PresentationTests {
         run(0.08)
         check(gatedMailbox.statistics.submitted == 0 && gatedMailbox.take()?.ptsUs == 11,
               "hiding rejects an already queued callback and preserves the newest frame")
+        check(!gatedMailbox.statistics.presentationEnabled && gatedMailbox.statistics.lastSubmittedFrameAt == nil,
+              "hidden presentation is explicitly distinguishable from an idle or failed display")
 
         gatedMailbox.put(pixels, ptsUs: 12); gatedMailbox.put(pixels, ptsUs: 13)
         run(0.08)
@@ -80,9 +86,15 @@ struct PresentationTests {
         run(0.08)
         check(gatedMailbox.statistics.submitted == 1 && gatedMailbox.take() == nil,
               "resuming a hidden surface consumes its single latest pending frame")
+        check(gatedMailbox.statistics.presentationEnabled && gatedMailbox.statistics.lastSubmittedFrameAt.map {
+            ProcessInfo.processInfo.systemUptime - $0 < 0.5
+        } == true, "successful display enqueue records local monotonic time")
+        let lastSubmittedAt = gatedMailbox.statistics.lastSubmittedFrameAt
         run(0.06)
         check(gatedMailbox.statistics.submitted == 1,
               "resumed surface does not repeatedly submit the retained display image")
+        check(gatedMailbox.statistics.lastSubmittedFrameAt == lastSubmittedAt,
+              "idle display does not refresh the submission timestamp")
 
         surface.setPresentationEnabled(false)
         let replacementMailbox = FrameMailbox()
@@ -93,6 +105,8 @@ struct PresentationTests {
         run(0.08)
         check(replacementMailbox.statistics.submitted == 0 && replacementMailbox.take()?.ptsUs == 21,
               "replacing a hidden mailbox remains inactive and retains its latest frame")
+        check(!replacementMailbox.statistics.presentationEnabled && !gatedMailbox.statistics.presentationEnabled,
+              "replacement records disabled presentation on both hidden and detached sources")
         check(gatedMailbox.statistics.submitted == 1 && gatedMailbox.take()?.ptsUs == 14,
               "mailbox replacement detaches the old source from presentation")
         replacementMailbox.put(pixels, ptsUs: 22)
@@ -108,6 +122,7 @@ struct PresentationTests {
         run(0.08)
         check(replacementMailbox.statistics.submitted == 1 && replacementMailbox.take()?.ptsUs == 23,
               "stopped view cannot be reactivated by a later visible-page update")
+        check(!replacementMailbox.statistics.presentationEnabled, "stopped display diagnostics remain disabled")
         print("\(count) presentation lifecycle checks passed; no app window, capture, or system clipboard used.")
     }
 }

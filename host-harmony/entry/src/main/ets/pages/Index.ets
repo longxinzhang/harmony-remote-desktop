@@ -7,6 +7,7 @@ import { ClipboardPermission } from '../services/ClipboardPermission';
 import { StartupService, StartupState } from '../services/StartupService';
 
 interface DeviceSnapshot {
+  savedAtUnixMs: number;
   appVersion: string;
   appBuild: number;
   sessionMode: string;
@@ -14,6 +15,7 @@ interface DeviceSnapshot {
   osFullName: string;
   api: number;
   sdk: string;
+  privacyMaskMode: number;
 }
 
 interface ClipboardSnapshot {
@@ -47,6 +49,21 @@ interface InputSnapshot {
   callbackCount: number;
 }
 
+interface EncoderPrivacySnapshot {
+  requestedMaskMode: number;
+  strategyApplied: boolean;
+  privateSceneActive: boolean;
+  enterEvents: number;
+  exitEvents: number;
+  framesSinceLastExit: number;
+  firstFrameAfterLastExitMs: number;
+}
+
+interface EncoderCaptureState {
+  lastName: string;
+  lastFrameAgeMs: number;
+}
+
 interface EncoderSnapshot {
   status: string;
   running: boolean;
@@ -54,6 +71,8 @@ interface EncoderSnapshot {
   averageFps: number;
   elapsedSeconds: number;
   bytes: number;
+  privacy: EncoderPrivacySnapshot;
+  captureState: EncoderCaptureState;
 }
 
 interface LanSnapshot {
@@ -132,6 +151,9 @@ struct Index {
   @StorageLink('hrdStartServerOnLaunch') startServerOnLaunch: boolean = false;
   @StorageLink('hrdFrameRate') frameRate: number = 30;
   @StorageLink('hrdCaptureAudio') captureAudio: boolean = false;
+  @StorageLink('hrdPrivacyMaskMode') privacyMaskMode: number = 1;
+  @State privacySummary: string = '尚未开始共享';
+  @State saveNumericDiagnostics: boolean = false;
   @State startupState: StartupState = new StartupState();
   @State pairingAvailable: boolean = false;
   @State pairingAllowed: boolean = false;
@@ -157,6 +179,7 @@ struct Index {
       this.sessionMode = 'permanent';
     }
     if (this.frameRate !== 30 && this.frameRate !== 60) { this.frameRate = 30; }
+    if (this.privacyMaskMode !== 0 && this.privacyMaskMode !== 1) { this.privacyMaskMode = 1; }
     this.refresh();
     this.refreshStartup();
     if (this.startServerOnLaunch && !this.startedServiceForLaunch && !this.lanRunning) {
@@ -196,6 +219,9 @@ struct Index {
       this.encoderFps = encoder.averageFps;
       this.encoderElapsed = encoder.elapsedSeconds;
       this.encoderBytes = encoder.bytes;
+      this.privacySummary = `本次 mode=${encoder.privacy.requestedMaskMode} · 策略${encoder.privacy.strategyApplied ? '已应用' : '未应用'} · ` +
+        `状态 ${encoder.captureState.lastName} · 隐私进入/退出 ${encoder.privacy.enterEvents}/${encoder.privacy.exitEvents} · ` +
+        `距最近编码帧 ${encoder.captureState.lastFrameAgeMs} ms · 退出后 ${encoder.privacy.framesSinceLastExit} 帧`;
       const lan = JSON.parse(probe.lanSnapshot()) as LanSnapshot;
       this.pairingAvailable = lan.pairingAvailable;
       this.pairingAllowed = lan.pairingAllowed;
@@ -231,8 +257,10 @@ struct Index {
         this.persistDiagnostics();
       }
       this.clipboardStateSnapshot = clipboardState;
-      const lanState = `${lan.status}:${lan.streaming}:${encoder.running}:${remote.allowed}:${remote.sessionEnabled}`;
-      if (this.lanStateSnapshot !== '' && lanState !== this.lanStateSnapshot) {
+      const lanState = `${lan.status}:${lan.streaming}:${encoder.running}:${remote.allowed}:${remote.sessionEnabled}:` +
+        `${encoder.privacy.enterEvents}:${encoder.privacy.exitEvents}`;
+      if ((this.lanStateSnapshot !== '' && lanState !== this.lanStateSnapshot) ||
+        (this.saveNumericDiagnostics && this.encoderRunning)) {
         this.persistDiagnostics();
       }
       this.lanStateSnapshot = lanState;
@@ -296,7 +324,7 @@ struct Index {
   }
 
   private startEncoder(): void {
-    const code = probe.startEncoder(this.filesDir);
+    const code = probe.startEncoder(this.filesDir, this.privacyMaskMode);
     this.setOperationResult(code, '请在系统弹窗选择整个主屏幕，开始 10 秒编码测试。', '无法开始编码测试，请检查开发测试中的诊断。');
     this.refresh();
   }
@@ -320,7 +348,7 @@ struct Index {
 
   private startLanCapture(): void {
     this.cancelAction();
-    const code = probe.startLanCapture(this.filesDir, this.sessionMode === 'debug' ? 600 : 0, this.frameRate, this.captureAudio);
+    const code = probe.startLanCapture(this.filesDir, this.sessionMode === 'debug' ? 600 : 0, this.frameRate, this.captureAudio, this.privacyMaskMode);
     this.setOperationResult(code, this.sessionMode === 'debug' ?
       '请允许共享整个主屏幕；开始共享后 10 分钟自动结束，可随时停止。' :
       '请允许共享整个主屏幕；永久上线模式不设自动结束时间，可随时停止。',
@@ -367,13 +395,15 @@ struct Index {
 
   private persistDiagnostics(): void {
     const device: DeviceSnapshot = {
+      savedAtUnixMs: Date.now(),
       appVersion: this.appVersion,
       appBuild: this.appBuild,
       sessionMode: this.sessionMode,
       deviceType: deviceInfo.deviceType,
       osFullName: deviceInfo.osFullName,
       api: deviceInfo.sdkApiVersion,
-      sdk: '26.0.0.105'
+      sdk: '26.0.0.105',
+      privacyMaskMode: this.privacyMaskMode
     };
     const code = probe.saveDiagnostics(this.filesDir, JSON.stringify(device));
     this.diagnosticsStatus = code === 0 ? '诊断已保存。可连续执行多个测试，完成后统一导出。' : `诊断保存失败：${code}`;
@@ -821,6 +851,24 @@ struct Index {
       this.pageHeading('开发测试', '能力验证与诊断工具。切换页面不会中断远程会话。')
       Text(`配对密钥：${this.pairingAvailable ? '可用' : '不可用'} ${this.pairingError}`).fontSize(12).fontColor('#61738C')
       Text(`音频：${this.audioText}`).fontSize(11).fontColor('#61738C').copyOption(CopyOptions.InApp)
+      Column({ space: 14 }) {
+        this.cardHeading('隐私场景排查', '遮挡范围在下次共享开始时生效；窗口级模式仍会保护隐私窗口内容。')
+        Select([{ value: '窗口级遮挡 · mode 1（默认）' }, { value: '整屏遮挡 · mode 0（对照）' }])
+          .selected(this.privacyMaskMode === 1 ? 0 : 1)
+          .value(this.privacyMaskMode === 1 ? '窗口级遮挡 · mode 1（默认）' : '整屏遮挡 · mode 0（对照）')
+          .enabled(!this.captureRunning && !this.encoderRunning)
+          .onSelect((index: number) => { this.privacyMaskMode = index === 0 ? 1 : 0; })
+        Text(this.privacySummary).fontSize(12).fontColor('#4E6484').lineHeight(20)
+        Row({ space: 12 }) {
+          Toggle({ type: ToggleType.Switch, isOn: this.saveNumericDiagnostics })
+            .onChange((enabled: boolean) => { this.saveNumericDiagnostics = enabled; })
+          Text('连续保存数字诊断（共享时每秒覆盖，不保存画面或输入内容）').fontSize(12).fontColor('#61738C')
+        }
+        Text('密码场景请使用远程桌面的局域网共享，不使用下方会保存录像的本机测试。使用测试字符，关闭剪贴板同步；将目标窗口缩小，观察窗口外区域与退出后的恢复。')
+          .fontSize(12).fontColor('#61738C').lineHeight(20)
+        Text('Surface 直连硬编，不单独统计原始采集帧；请结合编码、发送和 Mac 解码/显示计数判断。黑色画面本身不能证明隐私遮挡。帧龄 -1 表示尚无输出。')
+          .fontSize(12).fontColor('#61738C').lineHeight(20)
+      }.alignItems(HorizontalAlign.Start).width('100%').padding(22).backgroundColor('#FFFFFF').borderRadius(12)
       if (this.lanRunning) {
         Text('局域网服务正在运行，本机录屏与注入测试已停用。可继续查看诊断；下线后即可测试。')
           .fontSize(13).fontColor('#8C6A32').lineHeight(20).padding(16).width('100%')

@@ -17,6 +17,8 @@ final class FrameMailbox {
     private var replacements = 0
     private var submitted = 0
     private var displayError = ""
+    private var lastSubmittedFrameAt: TimeInterval?
+    private var presentationEnabled = false
     private var frameWidth = 0
     private var frameHeight = 0
     private var onPendingFrame: (() -> Void)?
@@ -43,11 +45,16 @@ final class FrameMailbox {
     }
     func displayed(error: String? = nil) {
         lock.lock(); defer { lock.unlock() }
-        if let error { displayError = error } else { submitted += 1 }
+        if let error { displayError = error }
+        else { submitted += 1; lastSubmittedFrameAt = ProcessInfo.processInfo.systemUptime }
     }
-    var statistics: (replaced: Int, submitted: Int, error: String) {
+    func setPresentationEnabled(_ enabled: Bool) {
         lock.lock(); defer { lock.unlock() }
-        return (replacements, submitted, displayError)
+        presentationEnabled = enabled
+    }
+    var statistics: (replaced: Int, submitted: Int, error: String, lastSubmittedFrameAt: TimeInterval?, presentationEnabled: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (replacements, submitted, displayError, lastSubmittedFrameAt, presentationEnabled)
     }
     var dimensions: (width: Int, height: Int) {
         lock.lock(); defer { lock.unlock() }
@@ -110,6 +117,7 @@ final class VideoSurfaceView: NSView {
         layer = display
         display.backgroundColor = NSColor.black.cgColor
         display.videoGravity = .resizeAspect
+        mailbox.setPresentationEnabled(true)
         observeMailbox()
         // status is KVO-observable (AVSampleBufferDisplayLayer.h). Keep observing
         // asynchronous failure after the last frame without an idle polling timer.
@@ -124,11 +132,13 @@ final class VideoSurfaceView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
     func stop() {
         stopped = true; mailbox.observePendingFrames(nil); presentation.stop()
+        mailbox.setPresentationEnabled(false)
         releaseFocus(); removeObservers(); display.flushAndRemoveImage()
         displayStatusObserver?.invalidate(); displayStatusObserver = nil
     }
     deinit {
         mailbox.observePendingFrames(nil); presentation.stop()
+        mailbox.setPresentationEnabled(false)
         for token in observers { NotificationCenter.default.removeObserver(token) }
         displayStatusObserver?.invalidate()
     }
@@ -184,12 +194,15 @@ final class VideoSurfaceView: NSView {
     }
     func replaceMailbox(_ value: FrameMailbox) {
         mailbox.observePendingFrames(nil); presentation.cancel()
+        mailbox.setPresentationEnabled(false)
         releaseFocus(); display.flushAndRemoveImage(); mailbox = value
+        mailbox.setPresentationEnabled(!stopped && presentationEnabled)
         if !stopped && presentationEnabled { observeMailbox() }
     }
     func setPresentationEnabled(_ enabled: Bool) {
         guard enabled != presentationEnabled, !stopped else { return }
         presentationEnabled = enabled
+        mailbox.setPresentationEnabled(enabled)
         if enabled { observeMailbox() }
         else {
             releaseFocus()

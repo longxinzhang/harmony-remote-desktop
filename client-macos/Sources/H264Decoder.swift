@@ -10,6 +10,7 @@ struct DecoderSnapshot {
     let hardwareAccelerated: Bool?
     let droppedFrames: Int
     let error: String?
+    let lastDecodedFrameAt: TimeInterval?
 }
 
 enum H264DecoderError: Error, CustomStringConvertible {
@@ -35,6 +36,7 @@ private final class H264DecoderState {
     var height = 0
     var hardware: Bool?
     var error: String?
+    var lastDecodedFrameAt: TimeInterval?
 }
 
 final class H264Decoder {
@@ -55,7 +57,8 @@ final class H264Decoder {
         state.condition.lock()
         defer { state.condition.unlock() }
         return DecoderSnapshot(decodedFrames: state.decoded, width: state.width, height: state.height,
-            hardwareAccelerated: state.hardware, droppedFrames: state.dropped, error: state.error)
+            hardwareAccelerated: state.hardware, droppedFrames: state.dropped, error: state.error,
+            lastDecodedFrameAt: state.lastDecodedFrameAt)
     }
 
     private func fail(_ error: H264DecoderError) -> H264DecoderError {
@@ -217,6 +220,7 @@ final class H264Decoder {
                         if state.error == nil { state.error = "VT decode output failed: status=\(status), dropped=\(dropped), image=\(image != nil)" }
                     } else if let image {
                         state.decoded += 1
+                        state.lastDecodedFrameAt = ProcessInfo.processInfo.systemUptime
                         state.width = CVPixelBufferGetWidth(image); state.height = CVPixelBufferGetHeight(image)
                         deliver = !state.closed && state.error == nil
                     }

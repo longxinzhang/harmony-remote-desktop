@@ -4,6 +4,8 @@ import Network
 struct LANConnectionSnapshot {
     var receivedFrames: Int = 0
     var receivedBytes: Int = 0
+    // Successful nonempty access-unit receipt, not TCP activity or heartbeat.
+    var lastReceivedFrameAt: TimeInterval?
     var paired: Bool = false
     var videoReady: Bool = false
     var inputSupported: Bool = false
@@ -608,6 +610,9 @@ final class LANConnection {
                             let frames = try WireProtocol.addCount($0.receivedFrames,
                                 packet.type == 2 && !packet.payload.isEmpty ? 1 : 0)
                             $0.receivedBytes = bytes; $0.receivedFrames = frames
+                            if packet.type == 2 && !packet.payload.isEmpty {
+                                $0.lastReceivedFrameAt = ProcessInfo.processInfo.systemUptime
+                            }
                         }
                         if packet.type == 2 && !packet.payload.isEmpty && self.snapshot.receivedFrames == 1 {
                             self.onStatus("正在共享鸿蒙桌面")

@@ -27,6 +27,7 @@ struct EncoderSessionOptions {
     bool recordLocally = true;
     int frameRate = 30; // Only 30 or 60; checked against hardware capability.
     bool captureSystemAudio = false; // Applies next share, microphone stays disabled.
+    int privacyMaskMode = 1; // 1: mask privacy window; 0: SDK whole-screen fallback for comparison.
 };
 
 class EncoderProbe final {

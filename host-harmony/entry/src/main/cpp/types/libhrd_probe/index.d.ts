@@ -1,13 +1,13 @@
 export const startCapture: (filesDir: string) => number;
 export const stopCapture: () => void;
 export const captureSnapshot: () => string;
-export const startEncoder: (filesDir: string) => number;
+export const startEncoder: (filesDir: string, privacyMaskMode: number) => number;
 export const stopEncoder: () => void;
 export const encoderSnapshot: () => string;
 export const startLanServer: (bindAddress: string) => number;
 export const stopLanServer: () => void;
 export const lanSnapshot: () => string;
-export const startLanCapture: (filesDir: string, durationSeconds: number, frameRate: number, systemAudio: boolean) => number;
+export const startLanCapture: (filesDir: string, durationSeconds: number, frameRate: number, systemAudio: boolean, privacyMaskMode: number) => number;
 export const remoteInputSnapshot: () => string;
 export const allowRemoteInput: (allowed: boolean) => number;
 export const requestInputAuthorization: () => number;

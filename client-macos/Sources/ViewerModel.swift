@@ -87,6 +87,11 @@ final class ViewerModel: ObservableObject {
     @Published var decodedFrames = 0
     @Published var renderedFrames = 0
     @Published var displayReplacements = 0
+    @Published var receivedFrameAgeMilliseconds: Double?
+    @Published var decodedFrameAgeMilliseconds: Double?
+    @Published var displaySubmissionAgeMilliseconds: Double?
+    @Published var decoderError = ""
+    @Published var videoDiagnosticStatus = "尚无视频诊断"
     @Published var dimensions = "—"
     @Published var hardware = "待检测"
     @Published var failed = false
@@ -114,6 +119,11 @@ final class ViewerModel: ObservableObject {
     private var lastResult = "NOT_RUN"
     private var startedAt: Date?
     private var sessionHost = ""
+    private var diagnosticHistory: [[String: Any]] = []
+    private var diagnosticStartedAt: TimeInterval = 0
+    private var diagnosticWallClockStartedAt: Date?
+    private var diagnosticLastSampleAt: TimeInterval?
+    private var diagnosticSessionNumber = 0
 
     init() {
         clipboard.onChange = { [weak self] in self?.refreshClipboard() }
@@ -149,11 +159,20 @@ final class ViewerModel: ObservableObject {
         stopClipboard(); stopAudio()
         replayCancellation?.cancel(); connection?.disconnect(); pipeline?.cancel()
         generation = UUID(); mailbox = FrameMailbox()
+        if !reconnecting {
+            diagnosticHistory.removeAll(keepingCapacity: true)
+            diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
+            diagnosticWallClockStartedAt = Date()
+            diagnosticSessionNumber = 0
+        }
+        diagnosticSessionNumber += 1; diagnosticLastSampleAt = nil
         let decoder = DecodePipeline(mailbox: mailbox); pipeline = decoder
         active = true; failed = false; replay = isReplay
         startStatisticsTimer()
         inputEnabled = false; inputSupported = false
         receivedFrames = 0; decodedFrames = 0; renderedFrames = 0; displayReplacements = 0
+        receivedFrameAgeMilliseconds = nil; decodedFrameAgeMilliseconds = nil; displaySubmissionAgeMilliseconds = nil
+        decoderError = ""; videoDiagnosticStatus = "等待视频数据"
         dimensions = "—"; hardware = "待检测"; lastResult = "RUNNING"; startedAt = Date()
         return (generation, decoder)
     }
@@ -276,7 +295,7 @@ final class ViewerModel: ObservableObject {
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
                     }
                 }
-                self.refresh()
+                self.refresh(forceDiagnosticSample: true)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     guard let self, self.generation == id else { return }
                     self.refresh(); self.writeAutomaticReport()
@@ -293,7 +312,7 @@ final class ViewerModel: ObservableObject {
         connection?.disconnect(); pipeline?.cancel()
         inputEnabled = false
         active = false; state = "已断开"; detail = "当前保留最后一帧。"; lastResult = "USER_STOPPED"
-        timer?.invalidate(); timer = nil; refresh()
+        timer?.invalidate(); timer = nil; refresh(forceDiagnosticSample: true)
         pin = ""
     }
 
@@ -399,8 +418,11 @@ final class ViewerModel: ObservableObject {
         keyboardMode = mode
     }
 
-    private func refresh() {
-        if !replay, let snapshot = connection?.snapshot {
+    private func refresh(forceDiagnosticSample: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        func age(_ timestamp: TimeInterval?) -> Double? { timestamp.map { max(0, now - $0) * 1000 } }
+        let network = replay ? nil : connection?.snapshot
+        if let snapshot = network {
             networkType = active ? snapshot.networkType : "已断开"
             networkRTT = active ? snapshot.rttMilliseconds : nil
             networkJitter = active ? snapshot.jitterMilliseconds : nil
@@ -412,17 +434,51 @@ final class ViewerModel: ObservableObject {
             let enabled = active && snapshot.inputEnabled
             if inputEnabled != enabled { inputEnabled = enabled }
         }
-        if active, let snapshot = pipeline?.snapshot { updateDecoder(snapshot) }
+        let decoder = pipeline?.snapshot
+        if let decoder { updateDecoder(decoder) }
         refreshAudioStatus()
         let display = mailbox.statistics
+        receivedFrameAgeMilliseconds = age(network?.lastReceivedFrameAt)
+        decodedFrameAgeMilliseconds = age(decoder?.lastDecodedFrameAt)
+        displaySubmissionAgeMilliseconds = age(display.lastSubmittedFrameAt)
         if renderedFrames != display.submitted { renderedFrames = display.submitted }
         if displayReplacements != display.replaced { displayReplacements = display.replaced }
         if !display.error.isEmpty {
             if !failed { failed = true }
             if detail != display.error { detail = display.error }
         }
+        if !decoderError.isEmpty { videoDiagnosticStatus = "解码器报告错误" }
+        else if !display.error.isEmpty { videoDiagnosticStatus = "显示层报告错误" }
+        else if !active { videoDiagnosticStatus = reconnecting ? "等待重新连接" : "会话未运行；未持续采样" }
+        else if !display.presentationEnabled { videoDiagnosticStatus = "当前页面已暂停显示提交；采集与解码独立统计" }
+        else if !replay && network?.lastReceivedFrameAt == nil { videoDiagnosticStatus = "尚未收到视频帧" }
+        else if !replay && (receivedFrameAgeMilliseconds ?? 0) >= 2000 { videoDiagnosticStatus = "最近 2 秒未收到视频帧；需结合鸿蒙采集记录判断" }
+        else if decoder?.lastDecodedFrameAt == nil || (decodedFrameAgeMilliseconds ?? 0) >= 2000 { videoDiagnosticStatus = "已有接收数据，等待新的解码输出" }
+        else if display.lastSubmittedFrameAt == nil || (displaySubmissionAgeMilliseconds ?? 0) >= 2000 { videoDiagnosticStatus = "已有解码输出，等待新的显示提交" }
+        else { videoDiagnosticStatus = "接收、解码与显示提交均有近期活动" }
+        // Reuse the active-session statistics timer. Never poll an idle viewer,
+        // inspect pixel colors, or infer privacy from a dark image.
+        if active || forceDiagnosticSample, diagnosticSessionNumber > 0,
+           forceDiagnosticSample || (diagnosticLastSampleAt.map({ now - $0 >= 1 }) ?? true) {
+            diagnosticLastSampleAt = now
+            diagnosticHistory.append([
+                "elapsedMilliseconds": max(0, now - diagnosticStartedAt) * 1000,
+                "sessionNumber": diagnosticSessionNumber, "active": active, "reconnecting": reconnecting,
+                "receivedFrames": receivedFrames, "receivedBytes": network?.receivedBytes ?? 0,
+                "decodedFrames": decodedFrames, "decoderDroppedFrames": decoder?.droppedFrames ?? 0,
+                "displaySubmittedFrames": display.submitted, "displayReplacedDecodedFrames": display.replaced,
+                "receivedFrameAgeMilliseconds": receivedFrameAgeMilliseconds as Any? ?? NSNull(),
+                "decodedFrameAgeMilliseconds": decodedFrameAgeMilliseconds as Any? ?? NSNull(),
+                "displaySubmissionAgeMilliseconds": displaySubmissionAgeMilliseconds as Any? ?? NSNull(),
+                "decoderHasError": !decoderError.isEmpty, "displayHasError": !display.error.isEmpty,
+                "displaySubmissionEnabled": display.presentationEnabled,
+                "videoPayloadMbps": network?.videoMbps ?? 0, "receivedFPS": network?.receivedFPS ?? 0
+            ])
+            if diagnosticHistory.count > 120 { diagnosticHistory.removeFirst(diagnosticHistory.count - 120) }
+        }
     }
     private func updateDecoder(_ snapshot: DecoderSnapshot) {
+        if decoderError != (snapshot.error ?? "") { decoderError = snapshot.error ?? "" }
         if decodedFrames != snapshot.decodedFrames { decodedFrames = snapshot.decodedFrames }
         if snapshot.width > 0 {
             let size = "\(snapshot.width) × \(snapshot.height)"
@@ -433,14 +489,24 @@ final class ViewerModel: ObservableObject {
     }
 
     private func reportData() throws -> Data {
+        refresh(forceDiagnosticSample: true)
         let display = mailbox.statistics
-        let report: [String: Any] = ["schemaVersion": 1, "appVersion": "0.6.0", "appBuild": 8, "result": lastResult,
+        let report: [String: Any] = ["schemaVersion": 2,
+            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+            "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown", "result": lastResult,
             "mode": replay ? "local_replay" : "live_lan", "host": replay ? "" : sessionHost,
             "startedAt": startedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "recordedAt": ISO8601DateFormatter().string(from: Date()),
             "receivedFrames": receivedFrames, "decodedFrames": decodedFrames,
             "displaySubmittedFrames": display.submitted, "displayReplacedDecodedFrames": display.replaced,
             "displayError": display.error, "dimensions": dimensions, "hardwareDecode": hardware,
+            "decoderError": decoderError, "decoderDroppedFrames": pipeline?.snapshot.droppedFrames ?? 0,
+            "receivedFrameAgeMilliseconds": receivedFrameAgeMilliseconds as Any? ?? NSNull(),
+            "decodedFrameAgeMilliseconds": decodedFrameAgeMilliseconds as Any? ?? NSNull(),
+            "displaySubmissionAgeMilliseconds": displaySubmissionAgeMilliseconds as Any? ?? NSNull(),
+            "displaySubmissionEnabled": display.presentationEnabled,
+            "videoDiagnosticStatus": videoDiagnosticStatus, "videoDiagnosticHistory": diagnosticHistory,
+            "videoDiagnosticStartedAt": diagnosticWallClockStartedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "inputControlMessagesSent": connection?.snapshot.inputSent ?? 0,
             "inputEnabledAtReport": inputEnabled,
             "networkRTTMilliseconds": networkRTT as Any? ?? NSNull(),
@@ -452,7 +518,7 @@ final class ViewerModel: ObservableObject {
             "clipboardMode": clipboardMode.rawValue, "clipboardConnected": clipboardConnected,
             "clipboardUpdatesSent": clipboard.sentCount, "clipboardUpdatesApplied": clipboard.appliedCount,
             "clipboardPasteCommitted": clipboard.committedCount, "clipboardLastBytes": clipboard.lastBytes,
-            "boundary": "Display submissions are not scanout timestamps. Replay uses synthetic pacing and does not prove live LAN. Input send counts do not prove target-app behavior. No end-to-end latency measurement."]
+            "boundary": "Frame ages use local monotonic clocks; receipt means complete nonempty AU, decode means successful VT output, display means layer submission, not scanout. History keeps at most 120 samples, about once per active second plus terminal/export samples. No pixels, passwords, input text, or privacy classification are recorded. Replay receipt age is unavailable and replay does not prove live LAN. Input send counts do not prove target-app behavior. No end-to-end latency measurement."]
         return try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
     }
     private func writeAutomaticReport() {

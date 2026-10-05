@@ -488,7 +488,7 @@ struct ViewerWindow: View {
                                 Label("导出诊断", systemImage: "square.and.arrow.down")
                             }
                         }
-                        Text("诊断不包含配对码和剪贴板正文。")
+                        Text("诊断只记录状态、计数和时长，不包含画面、密码、输入文字、配对码或剪贴板正文。")
                             .font(.system(size: 11)).foregroundStyle(WorkspaceColors.muted)
                     }
                     settingsCard("网络状态", symbol: "network") {
@@ -507,11 +507,20 @@ struct ViewerWindow: View {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3), alignment: .leading, spacing: 24) {
                             diagnosticMetric("接收帧数", "\(model.receivedFrames)")
                             diagnosticMetric("解码帧数", "\(model.decodedFrames)")
-                            diagnosticMetric("显示帧数", "\(model.renderedFrames)")
+                            diagnosticMetric("显示提交帧数", "\(model.renderedFrames)")
                             diagnosticMetric("待显示帧替换", "\(model.displayReplacements)")
                             diagnosticMetric("画面尺寸", model.dimensions)
                             diagnosticMetric("解码方式", model.hardware)
+                            diagnosticMetric("距最近接收", frameAge(model.receivedFrameAgeMilliseconds))
+                            diagnosticMetric("距最近解码", frameAge(model.decodedFrameAgeMilliseconds))
+                            diagnosticMetric("距最近显示提交", frameAge(model.displaySubmissionAgeMilliseconds))
                         }
+                        Text(model.videoDiagnosticStatus).font(.system(size: 12, weight: .medium))
+                        if !model.decoderError.isEmpty {
+                            Text(model.decoderError).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                        Text("进入此页会暂停画面显示提交。时长为最近一次采样值；显示提交不代表屏幕实际呈现。导出含最近最多 120 条逐秒统计，需与鸿蒙端隐私状态对照，不能单凭黑色画面判断隐私保护。")
+                            .font(.caption).foregroundStyle(WorkspaceColors.muted).fixedSize(horizontal: false, vertical: true)
                     }
                     settingsCard("输入与剪贴板", symbol: "keyboard.badge.ellipsis") {
                         HStack(alignment: .top, spacing: 24) {
@@ -538,6 +547,11 @@ struct ViewerWindow: View {
                 }.padding(.horizontal, 28).padding(.bottom, 28)
             }
         }.background(WorkspaceColors.canvas)
+    }
+
+    private func frameAge(_ milliseconds: Double?) -> String {
+        guard let milliseconds else { return "尚无记录" }
+        return String(format: "%.2f 秒", milliseconds / 1000)
     }
 
     private func diagnosticMetric(_ label: String, _ value: String) -> some View {

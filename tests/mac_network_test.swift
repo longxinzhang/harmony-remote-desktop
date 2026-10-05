@@ -226,6 +226,8 @@ private func integrationTests(path: String) throws -> Int {
     let statistics = client.snapshot
     try require(statistics.receivedFrames == 2 && statistics.receivedBytes == fixture.expected.count && statistics.paired && statistics.videoReady,
                 "NWConnection final statistics are incorrect")
+    try require(statistics.lastReceivedFrameAt.map { ProcessInfo.processInfo.systemUptime - $0 < 2 } == true,
+                "complete access units must record local monotonic receive time")
     client.disconnect(); client.disconnect()
     try fixture.waitForExit()
     Thread.sleep(forTimeInterval: 0.1)
@@ -348,6 +350,7 @@ private func sessionLifetimeIntegrationTests(path: String, duringStream: Bool) t
             throw TestFailure(description: "expired waiting did not terminate with deadline")
         }
         try require(client.snapshot.receivedFrames == 0 && packets == 0, "expired waiting was revived by received video")
+        try require(client.snapshot.lastReceivedFrameAt == nil, "expired access unit must not claim a received-frame timestamp")
         // Timeout intentionally interrupts this normal-EOS fixture; deinit terminates it.
     }
 }

@@ -1,5 +1,6 @@
 #include "encoder_probe.h"
 #include "encoder_timing.h"
+#include "capture_state_policy.h"
 
 #include <multimedia/player_framework/native_avcapability.h>
 #include <multimedia/player_framework/native_avcodec_videoencoder.h>
@@ -126,6 +127,12 @@ void CadenceJson(std::ostream& out, const encoder_timing::Cadence& cadence)
 struct EncoderProbe::Impl {
     struct Api { std::string name; uint64_t calls = 0; int last = 0; int firstError = 0; };
     struct Event { std::string source; int code; int64_t at; };
+    struct CaptureEvent {
+        int code = -1;
+        int64_t atUnixMs = 0, sinceStartMs = 0, lastOutputAgeMs = -1, lastFrameAgeMs = -1;
+        bool started = false, paused = false, stopping = false, cancelled = false, privateScene = false;
+        uint64_t frames = 0, outputBuffers = 0, acceptedPackets = 0, acceptedBytes = 0;
+    };
     struct Packet {
         std::vector<uint8_t> bytes;
         int64_t pts = 0, callbackSteadyNs = 0;
@@ -141,6 +148,11 @@ struct EncoderProbe::Impl {
         bool recordLocally = true;
         int durationSeconds = 10, requestedFps = 30;
         bool captureSystemAudio = false, capturePaused = false;
+        int privacyMaskMode = 1, lastCaptureState = -1;
+        bool privacyStrategyApplied = false, privateScene = false;
+        uint64_t privateSceneEntries = 0, privateSceneExits = 0, captureEventOverflow = 0;
+        uint64_t framesAtLastPrivacyExit = 0;
+        int64_t lastPrivacyExitSteadyNs = 0, firstFrameAfterLastPrivacyExitMs = -1;
         uint64_t audioBuffers = 0, audioBytes = 0, audioDroppedBuffers = 0, audioInvalidBuffers = 0;
         bool streamEnabled = false, streamCancelled = false, streamFailed = false;
         bool streamEosAccepted = false, streamFinishedCalled = false, streamFinishedSuccess = false;
@@ -164,6 +176,7 @@ struct EncoderProbe::Impl {
         encoder_timing::Cadence outputCallbackCadence, frameOutputCadence;
         std::vector<Api> apis;
         std::vector<Event> events;
+        std::deque<CaptureEvent> captureEvents; // Latest 64 callbacks; counters only, never pixels or input.
     } data;
     std::mutex lifecycle;
     std::mutex mutex;
@@ -406,6 +419,10 @@ struct EncoderProbe::Impl {
         if (attr.flags & AVCODEC_BUFFER_FLAGS_DISCARD) ++data.discardFlags;
         if (frame) {
             data.frameOutputCadence.Observe(SteadyNs(callbackArrival));
+            if (data.lastPrivacyExitSteadyNs > 0 && data.firstFrameAfterLastPrivacyExitMs < 0 &&
+                SteadyNs(callbackArrival) >= data.lastPrivacyExitSteadyNs) {
+                data.firstFrameAfterLastPrivacyExitMs = (SteadyNs(callbackArrival) - data.lastPrivacyExitSteadyNs) / 1000000;
+            }
             if (!data.frames) { data.firstOutputAt = Clock::now(); data.firstPts = attr.pts; }
             else if (attr.pts < data.lastPts) data.timestampMonotonic = false;
             ++data.frames;
@@ -466,18 +483,31 @@ struct EncoderProbe::Impl {
         try {
             std::lock_guard<std::mutex> lock(self->mutex);
             self->EventLocked("capture state", static_cast<int>(code));
-            if (code == OH_SCREEN_CAPTURE_STATE_STARTED) self->data.captureStarted = true;
-            if (code == OH_SCREEN_CAPTURE_STATE_PAUSED_BY_USER || code == OH_SCREEN_CAPTURE_STATE_PAUSED_BY_APP)
-                self->data.capturePaused = true;
-            if (code == OH_SCREEN_CAPTURE_STATE_RESUMED_BY_USER || code == OH_SCREEN_CAPTURE_STATE_RESUMED_BY_APP)
-                self->data.capturePaused = false;
-            if ((code == OH_SCREEN_CAPTURE_STATE_CANCELED || code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER ||
-                code == OH_SCREEN_CAPTURE_STATE_INTERRUPTED_BY_OTHER || code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_CALL ||
-                code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER_SWITCHES) && !self->data.captureStopping) {
+            auto& state = self->data;
+            state.lastCaptureState = static_cast<int>(code);
+            const int64_t nowNs = SteadyNs(Clock::now());
+            if (code == OH_SCREEN_CAPTURE_STATE_ENTER_PRIVATE_SCENE) ++state.privateSceneEntries;
+            if (code == OH_SCREEN_CAPTURE_STATE_EXIT_PRIVATE_SCENE) {
+                ++state.privateSceneExits;
+                state.framesAtLastPrivacyExit = state.frames;
+                state.lastPrivacyExitSteadyNs = nowNs;
+                state.firstFrameAfterLastPrivacyExitMs = -1;
+            }
+            if (capture_state::Apply(code, state.captureStopping, state.captureStarted,
+                state.capturePaused, state.privateScene)) {
                 self->data.cancel = true;
                 self->FreezeLocked();
                 self->data.status = "canceled";
             }
+            const auto ageMs = [nowNs](int64_t lastNs) -> int64_t {
+                return lastNs > 0 && nowNs >= lastNs ? (nowNs - lastNs) / 1000000 : -1;
+            };
+            if (state.captureEvents.size() == 64) { state.captureEvents.pop_front(); ++state.captureEventOverflow; }
+            state.captureEvents.push_back({static_cast<int>(code), UnixMs(),
+                (nowNs - SteadyNs(state.requestedAt)) / 1000000,
+                ageMs(state.outputCallbackCadence.lastSteadyNs), ageMs(state.frameOutputCadence.lastSteadyNs),
+                state.captureStarted, state.capturePaused, state.captureStopping, state.cancel, state.privateScene,
+                state.frames, state.outputBuffers, state.streamAcceptedPackets, state.streamAcceptedBytes});
             self->wake.notify_all();
         } catch (...) { self->CallbackException(); }
     }
@@ -502,6 +532,7 @@ struct EncoderProbe::Impl {
         OH_AVCodec* encoder = nullptr;
         OHNativeWindow* surface = nullptr;
         OH_AVScreenCapture* capture = nullptr;
+        OH_AVScreenCapture_CaptureStrategy* strategy = nullptr;
         bool encoderStarted = false, captureStartCalled = false;
         void StopProducer()
         {
@@ -518,6 +549,10 @@ struct EncoderProbe::Impl {
         {
             // Keep the callback context and surface alive until both SDK owners are stopped.
             try { StopProducer(); } catch (...) {}
+            if (strategy) {
+                const int code = OH_AVScreenCapture_ReleaseCaptureStrategy(strategy);
+                try { owner.Checked("OH_AVScreenCapture_ReleaseCaptureStrategy", code); } catch (...) {}
+            }
             if (capture) {
                 int code = OH_AVScreenCapture_Release(capture);
                 try { owner.Checked("OH_AVScreenCapture_Release", code); } catch (...) {}
@@ -638,6 +673,18 @@ struct EncoderProbe::Impl {
         if (!Checked("OH_AVScreenCapture_Init", OH_AVScreenCapture_Init(r.capture, config)) ||
             !Checked("OH_AVScreenCapture_SetMicrophoneEnabled", OH_AVScreenCapture_SetMicrophoneEnabled(r.capture, false)) ||
             !Checked("OH_AVScreenCapture_ShowCursor", OH_AVScreenCapture_ShowCursor(r.capture, true))) return false;
+        // Configure one strategy before Start. Only the requested mask policy is
+        // changed; all other capture/encoder/audio options above remain intact.
+        // Keep this instance if further strategy options are added in the future.
+        r.strategy = OH_AVScreenCapture_CreateCaptureStrategy();
+        if (!Checked("OH_AVScreenCapture_CreateCaptureStrategy(non-null)", r.strategy ? 0 : FAILURE) ||
+            !Checked("OH_AVScreenCapture_StrategyForPrivacyMaskMode",
+                OH_AVScreenCapture_StrategyForPrivacyMaskMode(r.strategy, data.privacyMaskMode)) ||
+            !Checked("OH_AVScreenCapture_SetCaptureStrategy", OH_AVScreenCapture_SetCaptureStrategy(r.capture, r.strategy))) return false;
+        { std::lock_guard<std::mutex> lock(mutex); data.privacyStrategyApplied = true; }
+        auto* appliedStrategy = r.strategy;
+        r.strategy = nullptr; // Release is attempted exactly once, including failure paths.
+        if (!Checked("OH_AVScreenCapture_ReleaseCaptureStrategy", OH_AVScreenCapture_ReleaseCaptureStrategy(appliedStrategy))) return false;
         if (PollStreamCancellation()) return false;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -717,6 +764,10 @@ struct EncoderProbe::Impl {
         double fps = elapsed > 0 && windowFrames > 1 ? double(windowFrames - 1) / elapsed : 0;
         auto pts = encoder_timing::AssessPts(data.firstPts, data.lastPts, data.frames,
             data.frameOutputCadence.SpanSeconds(), data.timestampMonotonic);
+        const int64_t nowNs = SteadyNs(Clock::now());
+        const auto ageMs = [nowNs](int64_t lastNs) -> int64_t {
+            return lastNs > 0 && nowNs >= lastNs ? (nowNs - lastNs) / 1000000 : -1;
+        };
         const char* verdict = data.running ? "RUNNING" : data.status == "idle" ? "NOT_RUN" :
             data.errorCode ? "FAILED" : data.timerFinished ? "NEEDS_MAC_DECODE_AND_FPS_REVIEW" : "INCOMPLETE";
         std::ostringstream out;
@@ -724,6 +775,23 @@ struct EncoderProbe::Impl {
         out << std::fixed << std::setprecision(3) << "{\"schemaVersion\":2,\"probe\":\"harmony-h264-phase0c\",\"status\":"
             << Quote(data.status) << ",\"running\":" << (data.running ? "true" : "false")
             << ",\"requestedFps\":" << data.requestedFps
+            << ",\"privacy\":{\"requestedMaskMode\":" << data.privacyMaskMode
+            << ",\"strategyApplied\":" << (data.privacyStrategyApplied ? "true" : "false")
+            << ",\"privateSceneActive\":" << (data.privateScene ? "true" : "false")
+            << ",\"enterEvents\":" << data.privateSceneEntries << ",\"exitEvents\":" << data.privateSceneExits
+            << ",\"framesAtLastExit\":" << data.framesAtLastPrivacyExit
+            << ",\"framesSinceLastExit\":" << (data.privateSceneExits ? data.frames - data.framesAtLastPrivacyExit : 0)
+            << ",\"lastExitAgeMs\":" << ageMs(data.lastPrivacyExitSteadyNs)
+            << ",\"firstFrameAfterLastExitMs\":" << data.firstFrameAfterLastPrivacyExitMs
+            << ",\"interpretation\":\"SDK scene notifications and encoder output only; not pixel classification or proof that protected content is visible\"}"
+            << ",\"captureState\":{\"lastCode\":" << data.lastCaptureState
+            << ",\"lastName\":" << Quote(capture_state::Name(data.lastCaptureState))
+            << ",\"started\":" << (data.captureStarted ? "true" : "false")
+            << ",\"paused\":" << (data.capturePaused ? "true" : "false")
+            << ",\"stopping\":" << (data.captureStopping ? "true" : "false")
+            << ",\"cancelRequested\":" << (data.cancel ? "true" : "false")
+            << ",\"captureFrameCountAvailable\":false,\"lastOutputAgeMs\":" << ageMs(data.outputCallbackCadence.lastSteadyNs)
+            << ",\"lastFrameAgeMs\":" << ageMs(data.frameOutputCadence.lastSteadyNs) << '}'
             << ",\"systemAudio\":{\"enabled\":" << (data.captureSystemAudio ? "true" : "false")
             << ",\"paused\":" << (data.capturePaused ? "true" : "false")
             << ",\"buffers\":" << data.audioBuffers << ",\"bytes\":" << data.audioBytes
@@ -802,7 +870,21 @@ struct EncoderProbe::Impl {
             const auto& e = data.events[i];
             out << "{\"source\":" << Quote(e.source) << ",\"code\":" << e.code << ",\"atUnixMs\":" << e.at << '}';
         }
-        out << "],\"eventOverflow\":" << data.eventOverflow << '}';
+        out << "],\"eventOverflow\":" << data.eventOverflow << ",\"captureStateEvents\":[";
+        for (size_t i = 0; i < data.captureEvents.size(); ++i) {
+            if (i) out << ',';
+            const auto& e = data.captureEvents[i];
+            out << "{\"code\":" << e.code
+                << ",\"name\":" << Quote(capture_state::Name(e.code))
+                << ",\"atUnixMs\":" << e.atUnixMs << ",\"sinceStartMs\":" << e.sinceStartMs
+                << ",\"started\":" << (e.started ? "true" : "false") << ",\"paused\":" << (e.paused ? "true" : "false")
+                << ",\"stopping\":" << (e.stopping ? "true" : "false") << ",\"cancelRequested\":" << (e.cancelled ? "true" : "false")
+                << ",\"privateSceneActive\":" << (e.privateScene ? "true" : "false")
+                << ",\"encodedFrames\":" << e.frames << ",\"outputBuffers\":" << e.outputBuffers
+                << ",\"streamAcceptedPackets\":" << e.acceptedPackets << ",\"streamAcceptedBytes\":" << e.acceptedBytes
+                << ",\"lastOutputAgeMs\":" << e.lastOutputAgeMs << ",\"lastFrameAgeMs\":" << e.lastFrameAgeMs << '}';
+        }
+        out << "],\"captureStateEventOverflow\":" << data.captureEventOverflow << '}';
         return out.str();
     }
     void Report()
@@ -926,6 +1008,7 @@ int EncoderProbe::Start(const std::string& filesDir, EncoderStreamHooks hooks, E
     const bool hasPacketSink = static_cast<bool>(hooks.packet);
     const bool hasAnyStreamHook = hasPacketSink || hooks.cancelled || hooks.finished || hooks.audioPCM || hooks.requestKeyframe;
     if ((options.frameRate != 30 && options.frameRate != 60) ||
+        !capture_state::ValidPrivacyMaskMode(options.privacyMaskMode) ||
         (options.captureSystemAudio && (!hasPacketSink || !hooks.audioPCM || options.recordLocally)) ||
         !encoder_session::ValidOptions(options.durationSeconds, options.recordLocally, hasPacketSink, hasAnyStreamHook)) {
         RejectStreamStart(hooks); return -1;
@@ -945,6 +1028,7 @@ int EncoderProbe::Start(const std::string& filesDir, EncoderStreamHooks hooks, E
         p.data.recordLocally = options.recordLocally;
         p.data.requestedFps = options.frameRate;
         p.data.captureSystemAudio = options.captureSystemAudio;
+        p.data.privacyMaskMode = options.privacyMaskMode;
         p.hooks = std::move(hooks);
         p.data.streamEnabled = static_cast<bool>(p.hooks.packet);
         p.packets.clear(); p.queuedBytes = 0; p.zeroRun = 0; p.expectNalHeader = false;

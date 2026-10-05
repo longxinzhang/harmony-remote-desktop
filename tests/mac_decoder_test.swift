@@ -27,6 +27,7 @@ struct DecoderTests {
             observedPts.append(pts)
             lock.unlock()
         }
+        try require(decoder.snapshot.lastDecodedFrameAt == nil, "unused decoder has no successful output timestamp")
         defer { decoder.close() }
         while position < wire.count {
             try require(wire.count - position >= 24, "complete HRD1 header")
@@ -66,6 +67,8 @@ struct DecoderTests {
         try require(snapshot.decodedFrames == 287 && count == 287 && ptsCount == 287, "VT fully decoded every real frame")
         try require(snapshot.width == 1620 && snapshot.height == 1080 && bad == 0, "actual nonempty pixel buffers at expected dimensions")
         try require(snapshot.droppedFrames == 0 && snapshot.error == nil, "no suppressed reference frames or decode errors")
+        try require(snapshot.lastDecodedFrameAt.map { ProcessInfo.processInfo.systemUptime - $0 < 2 } == true,
+                    "successful decode records local monotonic output time")
 
         func rejects(_ name: String, _ operation: (H264Decoder) throws -> Void) throws {
             let invalid = H264Decoder { _, _ in }
@@ -73,6 +76,8 @@ struct DecoderTests {
             var failed = false
             do { try operation(invalid) } catch { failed = true }
             try require(failed, "reject \(name)")
+            try require(invalid.snapshot.error != nil && invalid.snapshot.lastDecodedFrameAt == nil,
+                        "rejected \(name) records explicit error without claiming a successful decode")
         }
         try rejects("empty configuration") { try $0.configure(Data()) }
         try rejects("invalid configuration") { try $0.configure(Data("not Annex B".utf8)) }
